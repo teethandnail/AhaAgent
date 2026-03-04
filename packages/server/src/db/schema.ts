@@ -33,3 +33,15 @@ export const auditLogs = sqliteTable('audit_logs', {
   details: text('details'),
   timestamp: text('timestamp').notNull(),
 });
+
+export const memories = sqliteTable('memories', {
+  id: text('id').primaryKey(),
+  content: text('content').notNull(),
+  category: text('category').notNull(), // 'preference' | 'fact' | 'skill' | 'context'
+  sensitivity: text('sensitivity').notNull().default('public'), // 'public' | 'restricted' | 'secret'
+  accessCount: integer('access_count').notNull().default(0),
+  lastAccessedAt: text('last_accessed_at').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  metadata: text('metadata'), // JSON string for extra data
+});
