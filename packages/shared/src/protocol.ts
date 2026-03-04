@@ -1,0 +1,114 @@
+// WebSocket message envelope
+export interface WsEnvelope<T> {
+  protocolVersion: '1.0';
+  sessionId: string;
+  requestId: string;
+  idempotencyKey: string;
+  timestamp: string;
+  type: string;
+  payload: T;
+}
+
+// Client -> Server events
+export interface SendMessagePayload {
+  conversationId: string;
+  taskId?: string;
+  text: string;
+  model?: string;
+  contextRefs?: string[];
+}
+
+export interface ApproveActionPayload {
+  taskId: string;
+  approvalId: string;
+  approvalNonce: string;
+  decision: 'approve' | 'reject';
+  scope?: {
+    workspace: string;
+    maxActions: number;
+    timeoutSec: number;
+  };
+}
+
+export interface CancelTaskPayload {
+  taskId: string;
+  reason?: string;
+}
+
+// Server -> Client events
+export interface StreamChunkPayload {
+  taskId: string;
+  chunk: string;
+  isFinal: boolean;
+}
+
+export interface TaskStatusChangePayload {
+  taskId: string;
+  state: TaskState;
+  desc: string;
+  stepId?: string;
+  progress?: { current: number; total: number };
+}
+
+export interface ActionBlockedPayload {
+  taskId: string;
+  approvalId: string;
+  approvalNonce: string;
+  expiresAt: string;
+  riskLevel: RiskLevel;
+  actionType: ApprovalActionType;
+  target: string;
+  diffPreview?: string;
+  permissionScope: PermissionScope;
+}
+
+export interface TaskTerminalPayload {
+  taskId: string;
+  state: 'success' | 'failed' | 'cancelled';
+  summary: string;
+  errorCode?: string;
+}
+
+export interface ErrorPayload {
+  requestId: string;
+  errorCode: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+}
+
+// Shared enums/types
+export type TaskState =
+  | 'pending'
+  | 'running'
+  | 'blocked'
+  | 'success'
+  | 'failed'
+  | 'cancelled';
+export type RiskLevel = 'medium' | 'high' | 'critical';
+export type ApprovalActionType =
+  | 'write_file'
+  | 'delete_file'
+  | 'run_command'
+  | 'install_extension';
+
+export interface PermissionScope {
+  workspace: string;
+  maxActions: number;
+  timeoutSec: number;
+}
+
+// Event type string constants
+export const ClientEvents = {
+  SEND_MESSAGE: 'send_message',
+  APPROVE_ACTION: 'approve_action',
+  CANCEL_TASK: 'cancel_task',
+} as const;
+
+export const ServerEvents = {
+  STREAM_CHUNK: 'stream_chunk',
+  TASK_STATUS_CHANGE: 'task_status_change',
+  ACTION_BLOCKED: 'action_blocked',
+  TASK_TERMINAL: 'task_terminal',
+  ERROR: 'error',
+} as const;
