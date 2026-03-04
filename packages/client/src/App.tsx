@@ -22,8 +22,34 @@ export default function App() {
   const processedIndexRef = useRef(0);
 
   useEffect(() => {
-    const wsUrl = `ws://${window.location.hostname}:${import.meta.env.VITE_WS_PORT ?? '3000'}/ws`;
-    connect(wsUrl);
+    let cancelled = false;
+    const host = window.location.hostname;
+    const wsPort = import.meta.env.VITE_WS_PORT ?? '3000';
+    const httpProtocol = window.location.protocol === 'https:' ? 'https' : 'http';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+
+    (async () => {
+      try {
+        const res = await fetch(`${httpProtocol}://${host}:${wsPort}`);
+        const body = (await res.json()) as { token?: string };
+        const token = body.token;
+        if (!res.ok || typeof token !== 'string' || token.length === 0) {
+          throw new Error('Invalid gateway token response');
+        }
+        if (cancelled) return;
+        const wsUrl = `${wsProtocol}://${host}:${wsPort}/ws?token=${encodeURIComponent(token)}`;
+        connect(wsUrl);
+      } catch {
+        // Keep behavior predictable when gateway token endpoint is unreachable.
+        if (cancelled) return;
+        const fallbackWsUrl = `${wsProtocol}://${host}:${wsPort}/ws`;
+        connect(fallbackWsUrl);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [connect]);
 
   // Forward task-related WS events to the task store, processing any new messages

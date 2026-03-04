@@ -53,7 +53,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
   messages: [],
   pendingApproval: null,
   taskState: 'idle',
-  sessionId: '',
+  sessionId: crypto.randomUUID(),
   rawMessages: [],
 
   connect: (url: string) => {

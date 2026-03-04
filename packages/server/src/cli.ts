@@ -7,6 +7,7 @@ import type { LLMConfig } from './llm/router.js';
 async function main(): Promise<void> {
   const workspacePath = process.argv[2] ?? process.cwd();
   const port = parseInt(process.env.AHA_PORT ?? '3000', 10);
+  const originPort = parseInt(process.env.AHA_ORIGIN_PORT ?? '5173', 10);
   const dataDir = path.join(os.homedir(), '.aha');
 
   let llmConfig: LLMConfig | undefined;
@@ -19,6 +20,7 @@ async function main(): Promise<void> {
 
   const app = new AhaApp({
     port,
+    originPort,
     workspacePath,
     dataDir,
     llmConfig: llmConfig

@@ -39,7 +39,12 @@ export function createGateway(options: GatewayOptions): Gateway {
   const idempotencyStore = new IdempotencyStore(idempotencyTtlMs);
   idempotencyStore.startAutoCleanup();
 
-  const server = http.createServer((_req, res) => {
+  const server = http.createServer((req, res) => {
+    const origin = req.headers.origin;
+    if (origin && validateOrigin(origin, originPort)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', token: sessionToken }));
   });

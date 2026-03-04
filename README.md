@@ -159,6 +159,7 @@ node packages/server/dist/cli.js [工作区路径]
 | -------------- | ------------------ | ------------------------------------ |
 | 第一个命令行参数 | 当前目录 (cwd)     | 工作区路径，Agent 只能操作此目录下的文件 |
 | `AHA_PORT`     | `3000`             | HTTP/WebSocket 服务端口              |
+| `AHA_ORIGIN_PORT` | `5173`          | 允许的前端 Origin 端口（默认匹配 Vite） |
 
 **启动示例：**
 
@@ -183,6 +184,7 @@ AhaAgent daemon started
 ```
 
 > **Token** 是本次会话的鉴权令牌，前端通过 WebSocket 连接时需要携带。
+> 当前前端会在启动时先请求 `http://localhost:<AHA_PORT>` 获取 token，再自动拼接到 WebSocket 连接 URL，你无需手动输入。
 
 ### 启动前端
 

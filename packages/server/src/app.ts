@@ -32,6 +32,7 @@ import type { Database as SqliteDatabase } from 'better-sqlite3';
 
 export interface AhaAppConfig {
   port: number;
+  originPort?: number;
   workspacePath: string;
   dataDir: string;
   llmConfig?: { provider: string; model: string; apiKey: string; baseUrl: string };
@@ -104,6 +105,7 @@ export class AhaApp {
     // 4. Start gateway with message handler
     this.gateway = createGateway({
       port: this.config.port,
+      originPort: this.config.originPort,
       onMessage: (ws, envelope) => {
         this.handleMessage(envelope, ws);
       },
