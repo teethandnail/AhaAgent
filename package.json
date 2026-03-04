@@ -1,0 +1,36 @@
+{
+  "name": "aha-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "build:clean": "tsc --build --clean tsconfig.json && tsc --build tsconfig.json",
+    "dev": "concurrently -n shared,server,client \"npm run dev -w packages/shared\" \"npm run dev -w packages/server\" \"npm run dev -w packages/client\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --build tsconfig.json"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.0.0",
+    "@vitest/ui": "^3.0.0",
+    "concurrently": "^9.1.0",
+    "eslint": "^9.21.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.26.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@aha-agent/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aha-agent/shared": "*"
+  },
+  "scripts": {
+    "dev": "echo 'Client setup in Phase 1 Task 1.6'",
+    "build": "echo 'Client setup in Phase 1 Task 1.6'"
+  }
+}
