@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
@@ -7,6 +8,7 @@ import {
   type SendMessagePayload,
   type ApproveActionPayload,
   type CancelTaskPayload,
+  type StreamChunkPayload,
   type TaskStatusChangePayload,
   type TaskTerminalPayload,
   type ErrorPayload,
@@ -23,12 +25,81 @@ import { MutationQueue } from './orchestrator/mutation-queue.js';
 import { FileLock } from './orchestrator/file-lock.js';
 import { Sandbox } from './tools/sandbox.js';
 import { AuditLogger } from './logger/audit-logger.js';
-import { LLMRouter } from './llm/router.js';
+import { LLMRouter, type ChatMessage } from './llm/router.js';
 import { createDatabase, type AppDatabase } from './db/client.js';
 import { ExtensionInstaller } from './extensions/installer.js';
 import { ExtensionRunner } from './extensions/runner.js';
+import { readFile } from './tools/read-file.js';
+import { listDir } from './tools/list-dir.js';
+import { computeFileVersion } from './tools/file-version.js';
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
+
+const MAX_TOOL_STEPS = 8;
+
+const CODING_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'list_dir',
+      description: 'List entries under a directory in the current workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative path.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a UTF-8 text file in the workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_dir',
+      description: 'Create a directory recursively in the workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative directory path.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Write UTF-8 content to a file in the workspace. Creates parent directories if needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+          content: { type: 'string', description: 'File content.' },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      },
+    },
+  },
+] as const;
 
 export interface AhaAppConfig {
   port: number;
@@ -202,6 +273,205 @@ export class AhaApp {
     };
 
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
+
+    // Continue task execution asynchronously so the gateway thread stays responsive.
+    void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId);
+  }
+
+  private async runLLMTask(
+    taskId: string,
+    userText: string,
+    requestId: string,
+    ws: WebSocket,
+    traceId: string,
+  ): Promise<void> {
+    if (!this.llmRouter) {
+      this.taskManager.transition(taskId, 'failed');
+      const terminalPayload: TaskTerminalPayload = {
+        taskId,
+        state: 'failed',
+        summary: 'LLM is not configured. Set AHA_LLM_API_KEY or ~/.aha/config.json.',
+        errorCode: 'AHA-LLM-001',
+      };
+      this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+      return;
+    }
+
+    try {
+      const messages: ChatMessage[] = [
+        {
+          role: 'system',
+          content:
+            'You are a coding agent operating inside a local workspace. Use tools when filesystem changes are requested. ' +
+            'When the user asks to create files/directories, perform it with tools first, then report what was created.',
+        },
+        { role: 'user', content: userText },
+      ];
+
+      for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+        const response = await this.llmRouter.chat(messages, traceId, {
+          tools: CODING_TOOLS as unknown as unknown[],
+          toolChoice: 'auto',
+        });
+
+        const current = this.taskManager.getTask(taskId);
+        if (current?.status === 'cancelled') {
+          return;
+        }
+
+        if (response.toolCalls && response.toolCalls.length > 0) {
+          messages.push({
+            role: 'assistant',
+            content: response.content || '',
+            toolCalls: response.toolCalls.map((tc) => ({
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.name,
+                arguments: tc.arguments,
+              },
+            })),
+          });
+
+          for (const tc of response.toolCalls) {
+            const toolResult = await this.executeToolCall(tc.name, tc.arguments);
+            messages.push({
+              role: 'tool',
+              toolCallId: tc.id,
+              content: JSON.stringify(toolResult),
+            });
+          }
+
+          continue;
+        }
+
+        const chunkPayload: StreamChunkPayload = {
+          taskId,
+          chunk: response.content || '(empty response)',
+          isFinal: true,
+        };
+        this.sendEnvelope(ws, requestId, ServerEvents.STREAM_CHUNK, chunkPayload);
+
+        this.taskManager.transition(taskId, 'success');
+        const terminalPayload: TaskTerminalPayload = {
+          taskId,
+          state: 'success',
+          summary: 'Task completed',
+        };
+        this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+        return;
+      }
+
+      this.taskManager.transition(taskId, 'failed');
+      this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, {
+        taskId,
+        state: 'failed',
+        summary: `Task aborted after exceeding ${MAX_TOOL_STEPS.toString()} tool iterations.`,
+        errorCode: 'AHA-LLM-002',
+      } satisfies TaskTerminalPayload);
+    } catch (error: unknown) {
+      const current = this.taskManager.getTask(taskId);
+      if (current?.status === 'cancelled') {
+        return;
+      }
+
+      const errMsg = error instanceof Error ? error.message : 'Unknown LLM error';
+
+      this.auditLogger.error('LLM task failed', {
+        traceId,
+        taskId,
+        requestId,
+        error: errMsg,
+      });
+
+      this.taskManager.transition(taskId, 'failed');
+      const terminalPayload: TaskTerminalPayload = {
+        taskId,
+        state: 'failed',
+        summary: `LLM request failed: ${errMsg}`,
+        errorCode: 'AHA-LLM-002',
+      };
+      this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+    }
+  }
+
+  private resolveWorkspacePath(inputPath: string): string {
+    return path.isAbsolute(inputPath)
+      ? path.resolve(inputPath)
+      : path.resolve(this.config.workspacePath, inputPath);
+  }
+
+  private async ensureCreatablePath(targetPath: string): Promise<boolean> {
+    if (await this.sandbox.validatePath(targetPath)) {
+      return true;
+    }
+
+    let cursor = path.resolve(path.dirname(targetPath));
+    while (true) {
+      if (fs.existsSync(cursor)) {
+        return this.sandbox.validatePath(cursor);
+      }
+
+      const next = path.dirname(cursor);
+      if (next === cursor) {
+        return false;
+      }
+      cursor = next;
+    }
+  }
+
+  private async executeToolCall(name: string, rawArgs: string): Promise<Record<string, unknown>> {
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(rawArgs) as Record<string, unknown>;
+    } catch {
+      return { ok: false, error: 'Invalid JSON tool arguments' };
+    }
+
+    switch (name) {
+      case 'list_dir': {
+        const pathArg = typeof args.path === 'string' ? args.path : '.';
+        const result = await listDir({ path: this.resolveWorkspacePath(pathArg) }, this.sandbox);
+        return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.errorMessage };
+      }
+
+      case 'read_file': {
+        const pathArg = typeof args.path === 'string' ? args.path : '';
+        if (!pathArg) return { ok: false, error: 'path is required' };
+        const result = await readFile({ path: this.resolveWorkspacePath(pathArg) }, this.sandbox);
+        return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.errorMessage };
+      }
+
+      case 'create_dir': {
+        const pathArg = typeof args.path === 'string' ? args.path : '';
+        if (!pathArg) return { ok: false, error: 'path is required' };
+        const target = this.resolveWorkspacePath(pathArg);
+        if (!(await this.ensureCreatablePath(target))) {
+          return { ok: false, error: 'path escapes workspace boundary' };
+        }
+        await fsp.mkdir(target, { recursive: true });
+        return { ok: true, output: { path: target } };
+      }
+
+      case 'write_file': {
+        const pathArg = typeof args.path === 'string' ? args.path : '';
+        const content = typeof args.content === 'string' ? args.content : '';
+        if (!pathArg) return { ok: false, error: 'path is required' };
+
+        const target = this.resolveWorkspacePath(pathArg);
+        if (!(await this.ensureCreatablePath(target))) {
+          return { ok: false, error: 'path escapes workspace boundary' };
+        }
+
+        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await fsp.writeFile(target, content, 'utf-8');
+        const version = await computeFileVersion(target);
+        return { ok: true, output: { path: target, version } };
+      }
+
+      default:
+        return { ok: false, error: `Unsupported tool: ${name}` };
+    }
   }
 
   private handleApproveAction(
