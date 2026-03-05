@@ -19,6 +19,7 @@ export { readFile } from './tools/read-file.js';
 export { listDir } from './tools/list-dir.js';
 export { runCommand } from './tools/run-command.js';
 export { computeFileVersion } from './tools/file-version.js';
+export { searchWebDuckDuckGo, fetchUrlWithSafety, extractMainContent } from './tools/web-search.js';
 
 // Orchestrator
 export { TaskManager } from './orchestrator/task-manager.js';

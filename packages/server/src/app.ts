@@ -36,6 +36,7 @@ import { readFile } from './tools/read-file.js';
 import { listDir } from './tools/list-dir.js';
 import { computeFileVersion } from './tools/file-version.js';
 import { runCommand } from './tools/run-command.js';
+import { extractMainContent, fetchUrlWithSafety, searchWebDuckDuckGo } from './tools/web-search.js';
 import { evaluate } from './policy/policy-engine.js';
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
@@ -123,6 +124,72 @@ const CODING_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'browser_search',
+      description: 'Search the web and return top results with title/url/snippet.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          engine: { type: 'string', enum: ['duckduckgo'] },
+          maxResults: { type: 'number' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch_url',
+      description: 'Fetch a URL and return cleaned textual content for summarization.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          timeoutSec: { type: 'number' },
+          maxBytes: { type: 'number' },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_open',
+      description: 'Open a URL in browser-style fetch mode (alias of fetch_url).',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          timeoutSec: { type: 'number' },
+          maxBytes: { type: 'number' },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'extract_main_content',
+      description: 'Extract simplified markdown text from HTML.',
+      parameters: {
+        type: 'object',
+        properties: {
+          html: { type: 'string' },
+        },
+        required: ['html'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'diff_edit',
       description: 'Apply targeted text replacements in a file with optional version precondition.',
       parameters: {
@@ -193,6 +260,7 @@ export interface AhaAppConfig {
 
 export class AhaApp {
   private readonly config: AhaAppConfig;
+  private readonly verbose: boolean = process.env.AHA_VERBOSE !== '0';
 
   private gateway: Gateway | null = null;
   private taskManager: TaskManager;
@@ -299,6 +367,7 @@ export class AhaApp {
     }
 
     this.auditLogger.info('AhaAgent stopped');
+    this.logProgress('daemon_stopped');
   }
 
   private handleMessage(envelope: WsEnvelope<Record<string, unknown>>, ws: WebSocket): void {
@@ -332,6 +401,11 @@ export class AhaApp {
 
     // Create a task
     const task = this.taskManager.createTask(payload.text);
+    this.logProgress('task_created', {
+      taskId: task.id,
+      requestId: envelope.requestId,
+      message: payload.text,
+    });
 
     // Log the audit event
     this.auditLogger.audit({
@@ -370,6 +444,7 @@ export class AhaApp {
     ws: WebSocket,
     traceId: string,
   ): Promise<void> {
+    this.logProgress('llm_task_started', { taskId, requestId });
     if (!this.llmRouter) {
       this.taskManager.transition(taskId, 'failed');
       const terminalPayload: TaskTerminalPayload = {
@@ -379,6 +454,7 @@ export class AhaApp {
         errorCode: 'AHA-LLM-001',
       };
       this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+      this.logProgress('task_failed', { taskId, reason: terminalPayload.summary });
       return;
     }
 
@@ -387,8 +463,8 @@ export class AhaApp {
         {
           role: 'system',
           content:
-            'You are a coding agent operating inside a local workspace. Use tools when filesystem changes are requested. ' +
-            'When the user asks to create files/directories, perform it with tools first, then report what was created.',
+            'You are a coding agent operating inside a local workspace. Use tools when filesystem changes or web research are requested. ' +
+            'For web questions, prefer browser_search then fetch_url on top results, and cite source URLs in your final response.',
         },
         { role: 'user', content: userText },
       ];
@@ -423,6 +499,7 @@ export class AhaApp {
         errorCode: 'AHA-LLM-002',
       };
       this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+      this.logProgress('task_failed', { taskId, reason: errMsg });
     }
   }
 
@@ -444,6 +521,11 @@ export class AhaApp {
         tools: CODING_TOOLS as unknown as unknown[],
         toolChoice: 'auto',
       });
+      this.logProgress('llm_step_done', {
+        taskId: params.taskId,
+        step,
+        toolCalls: response.toolCalls?.length ?? 0,
+      });
 
       if (response.toolCalls && response.toolCalls.length > 0) {
         params.messages.push({
@@ -460,6 +542,11 @@ export class AhaApp {
         });
 
         for (const tc of response.toolCalls) {
+          this.logProgress('tool_call', {
+            taskId: params.taskId,
+            step,
+            tool: tc.name,
+          });
           const policyResult = this.evaluateToolPolicy(tc.name, tc.arguments, false);
           if (policyResult.decision === 'deny') {
             params.messages.push({
@@ -509,10 +596,20 @@ export class AhaApp {
 
             const blockedPayload = this.approvalManager.toBlockedPayload(approval);
             this.sendEnvelope(params.ws, params.requestId, ServerEvents.ACTION_BLOCKED, blockedPayload);
+            this.logProgress('approval_required', {
+              taskId: params.taskId,
+              approvalId: approval.approvalId,
+              action: tc.name,
+              target: this.describeToolTarget(tc.name, tc.arguments),
+            });
             return;
           }
 
-          const toolResult = await this.executeToolCall(tc.name, tc.arguments);
+          const toolResult = await this.executeToolCall(tc.name, tc.arguments, {
+            traceId: params.traceId,
+            taskId: params.taskId,
+            requestId: params.requestId,
+          });
           params.messages.push({
             role: 'tool',
             toolCallId: tc.id,
@@ -534,6 +631,7 @@ export class AhaApp {
         state: 'success',
         summary: 'Task completed',
       } satisfies TaskTerminalPayload);
+      this.logProgress('task_success', { taskId: params.taskId });
       return;
     }
 
@@ -544,6 +642,10 @@ export class AhaApp {
       summary: `Task aborted after exceeding ${MAX_TOOL_STEPS.toString()} tool iterations.`,
       errorCode: 'AHA-LLM-002',
     } satisfies TaskTerminalPayload);
+    this.logProgress('task_failed', {
+      taskId: params.taskId,
+      reason: `exceeded ${MAX_TOOL_STEPS.toString()} steps`,
+    });
   }
 
   private resolveWorkspacePath(inputPath: string): string {
@@ -571,7 +673,11 @@ export class AhaApp {
     }
   }
 
-  private async executeToolCall(name: string, rawArgs: string): Promise<Record<string, unknown>> {
+  private async executeToolCall(
+    name: string,
+    rawArgs: string,
+    context?: { traceId: string; taskId: string; requestId: string },
+  ): Promise<Record<string, unknown>> {
     let args: Record<string, unknown> = {};
     try {
       args = JSON.parse(rawArgs) as Record<string, unknown>;
@@ -580,6 +686,95 @@ export class AhaApp {
     }
 
     switch (name) {
+      case 'browser_search': {
+        const query = typeof args.query === 'string' ? args.query : '';
+        const maxResults =
+          typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
+            ? Math.max(1, Math.min(10, Math.floor(args.maxResults)))
+            : 5;
+        if (!query) return { ok: false, error: 'query is required' };
+        try {
+          const result = await searchWebDuckDuckGo(query, maxResults);
+          if (context) {
+            this.auditLogger.audit({
+              traceId: context.traceId,
+              taskId: context.taskId,
+              requestId: context.requestId,
+              actor: 'assistant',
+              action: 'browser_search',
+              result: 'ok',
+              details: { query, returned: result.results.length },
+            });
+          }
+          return { ok: true, output: result };
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : 'search failed';
+          if (context) {
+            this.auditLogger.audit({
+              traceId: context.traceId,
+              taskId: context.taskId,
+              requestId: context.requestId,
+              actor: 'assistant',
+              action: 'browser_search',
+              result: 'error',
+              details: { query, error: msg },
+            });
+          }
+          return { ok: false, error: msg };
+        }
+      }
+
+      case 'fetch_url':
+      case 'browser_open': {
+        const url = typeof args.url === 'string' ? args.url : '';
+        const timeoutSec =
+          typeof args.timeoutSec === 'number' && Number.isFinite(args.timeoutSec)
+            ? Math.max(1, Math.min(30, args.timeoutSec))
+            : 12;
+        const maxBytes =
+          typeof args.maxBytes === 'number' && Number.isFinite(args.maxBytes)
+            ? Math.max(16 * 1024, Math.min(1_000_000, Math.floor(args.maxBytes)))
+            : 512 * 1024;
+        if (!url) return { ok: false, error: 'url is required' };
+        try {
+          const fetched = await fetchUrlWithSafety({
+            url,
+            timeoutMs: Math.floor(timeoutSec * 1000),
+            maxBytes,
+          });
+          if (context) {
+            this.auditLogger.audit({
+              traceId: context.traceId,
+              taskId: context.taskId,
+              requestId: context.requestId,
+              actor: 'assistant',
+              action: name,
+              result: 'ok',
+              details: { url, finalUrl: fetched.finalUrl, status: fetched.status },
+            });
+          }
+          return {
+            ok: true,
+            output: {
+              finalUrl: fetched.finalUrl,
+              status: fetched.status,
+              title: fetched.title,
+              text: fetched.text.slice(0, 12_000),
+              html: fetched.html.slice(0, 30_000),
+            },
+          };
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : 'fetch failed';
+          return { ok: false, error: msg };
+        }
+      }
+
+      case 'extract_main_content': {
+        const html = typeof args.html === 'string' ? args.html : '';
+        if (!html) return { ok: false, error: 'html is required' };
+        return { ok: true, output: extractMainContent(html) };
+      }
+
       case 'list_dir': {
         const pathArg = typeof args.path === 'string' ? args.path : '.';
         const result = await listDir({ path: this.resolveWorkspacePath(pathArg) }, this.sandbox);
@@ -723,6 +918,13 @@ export class AhaApp {
       case 'write_file':
       case 'diff_edit':
         return 'write_file';
+      case 'browser_search':
+        return 'web_search';
+      case 'fetch_url':
+      case 'browser_open':
+        return 'fetch_url';
+      case 'extract_main_content':
+        return 'extract_main_content';
       case 'delete_file':
         return 'delete_file';
       case 'run_command':
@@ -759,6 +961,8 @@ export class AhaApp {
       const args = JSON.parse(rawArgs) as Record<string, unknown>;
       if (typeof args.path === 'string') return args.path;
       if (typeof args.command === 'string') return `${args.command} ${(args.args as string[] | undefined)?.join(' ') ?? ''}`.trim();
+      if (typeof args.url === 'string') return args.url;
+      if (typeof args.query === 'string') return args.query;
     } catch {
       // fall through
     }
@@ -780,12 +984,14 @@ export class AhaApp {
 
     const resourcePath = typeof args.path === 'string' ? this.resolveWorkspacePath(args.path) : undefined;
     const command = typeof args.command === 'string' ? args.command : undefined;
+    const url = typeof args.url === 'string' ? args.url : undefined;
 
     return evaluate({
       actor: 'assistant',
       action: this.toPolicyAction(toolName),
       resource: {
         path: resourcePath,
+        url,
         workspace: this.config.workspacePath,
         command,
       },
@@ -824,6 +1030,11 @@ export class AhaApp {
       result: result.valid ? 'approved' : 'rejected',
       details: { approvalId: payload.approvalId, decision: payload.decision },
     });
+    this.logProgress('approval_decision', {
+      taskId: payload.taskId,
+      approvalId: payload.approvalId,
+      decision: payload.decision,
+    });
 
     if (!result.valid) {
       this.sendError(ws, envelope.requestId, 'AHA-POLICY-002', result.error);
@@ -848,6 +1059,10 @@ export class AhaApp {
         summary: 'Action rejected by user',
         errorCode: 'AHA-POLICY-002',
       } satisfies TaskTerminalPayload);
+      this.logProgress('task_failed', {
+        taskId: payload.taskId,
+        reason: 'approval rejected',
+      });
       return;
     }
 
@@ -887,6 +1102,11 @@ export class AhaApp {
       const toolResult = await this.executeToolCall(
         pending.toolCall.name,
         pending.toolCall.arguments,
+        {
+          traceId: pending.traceId,
+          taskId: pending.taskId,
+          requestId: pending.requestId,
+        },
       );
       pending.messages.push({
         role: 'tool',
@@ -954,6 +1174,17 @@ export class AhaApp {
     };
 
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+    this.logProgress('task_cancelled', {
+      taskId: payload.taskId,
+      reason: terminalPayload.summary,
+    });
+  }
+
+  private logProgress(event: string, details?: Record<string, unknown>): void {
+    if (!this.verbose) return;
+    const ts = new Date().toISOString();
+    const suffix = details ? ` ${JSON.stringify(details)}` : '';
+    console.log(`[AhaAgent][${ts}] ${event}${suffix}`);
   }
 
   private sendEnvelope(ws: WebSocket, requestId: string, type: string, payload: unknown): void {

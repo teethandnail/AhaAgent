@@ -4,6 +4,10 @@ export type PolicyAction =
   | 'read_file'
   | 'list_dir'
   | 'grep'
+  | 'web_search'
+  | 'fetch_url'
+  | 'browser_open'
+  | 'extract_main_content'
   | 'diff_edit'
   | 'write_file'
   | 'delete_file'
@@ -19,6 +23,7 @@ export interface PolicyInput {
   action: PolicyAction;
   resource: {
     path?: string;
+    url?: string;
     workspace?: string;
     command?: string;
     extensionId?: string;

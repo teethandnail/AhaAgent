@@ -72,10 +72,43 @@ export interface RunCommandOutput {
   stderr: string;
 }
 
+export interface BrowserSearchInput {
+  query: string;
+  engine?: 'duckduckgo' | 'google' | 'bing' | 'searxng';
+  maxResults?: number;
+}
+export interface BrowserSearchOutput {
+  results: Array<{ id: string; title: string; url: string; snippet: string }>;
+}
+
+export interface FetchUrlInput {
+  url: string;
+  timeoutSec?: number;
+  maxBytes?: number;
+}
+export interface FetchUrlOutput {
+  finalUrl: string;
+  status: number;
+  title: string;
+  text: string;
+}
+
+export interface ExtractMainContentInput {
+  html: string;
+}
+export interface ExtractMainContentOutput {
+  title: string;
+  markdown: string;
+}
+
 export type ToolName =
   | 'read_file'
   | 'list_dir'
   | 'grep'
+  | 'web_search'
+  | 'fetch_url'
+  | 'browser_open'
+  | 'extract_main_content'
   | 'diff_edit'
   | 'write_file'
   | 'delete_file'

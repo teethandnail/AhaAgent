@@ -13,7 +13,15 @@ const APPROVAL_REQUIRED_ACTIONS: ReadonlySet<PolicyAction> = new Set([
 ]);
 
 /** Read-only actions that are allowed inside a valid workspace. */
-const READ_ACTIONS: ReadonlySet<PolicyAction> = new Set(['read_file', 'list_dir', 'grep']);
+const READ_ACTIONS: ReadonlySet<PolicyAction> = new Set([
+  'read_file',
+  'list_dir',
+  'grep',
+  'web_search',
+  'fetch_url',
+  'browser_open',
+  'extract_main_content',
+]);
 
 // ---------------------------------------------------------------------------
 // Helpers

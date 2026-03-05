@@ -404,6 +404,26 @@ describe('Read operations in workspace', () => {
     );
     expect(result.decision).toBe('allow');
   });
+
+  it('should allow web_search as read-only action', () => {
+    const result = evaluate(
+      makeInput({
+        action: 'web_search',
+        resource: {},
+      }),
+    );
+    expect(result.decision).toBe('allow');
+  });
+
+  it('should allow fetch_url as read-only action', () => {
+    const result = evaluate(
+      makeInput({
+        action: 'fetch_url',
+        resource: { url: 'https://example.com' },
+      }),
+    );
+    expect(result.decision).toBe('allow');
+  });
 });
 
 // ---------------------------------------------------------------------------
