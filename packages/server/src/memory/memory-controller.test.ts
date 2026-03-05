@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from '../db/schema.js';
 import { MemoryController } from './memory-controller.js';
-import { buildFtsQuery } from './recall.js';
+import { buildFtsQuery, containsCJK } from './recall.js';
 
 function createInMemoryDb() {
   const sqlite = new Database(':memory:');
@@ -388,6 +388,47 @@ describe('MemoryController', () => {
     expect(results[0]!.category).toBe('preference');
   });
 
+  // --- CJK LIKE-based recall ---
+
+  it('recall with two-character Chinese query works', () => {
+    controller.store({ content: '用户喜欢暗色模式', category: 'preference', sensitivity: 'public' });
+    controller.store({ content: '项目使用React框架', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('喜欢');
+    expect(results.length).toBe(1);
+    expect(results[0]!.content).toContain('喜欢');
+  });
+
+  it('recall with CJK query respects sensitivity filter', () => {
+    controller.store({ content: '秘密数据库密码是hunter2', category: 'fact', sensitivity: 'secret' });
+    controller.store({ content: '公开数据库地址是localhost', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('数据库');
+    expect(results.length).toBe(1);
+    expect(results[0]!.sensitivity).toBe('public');
+  });
+
+  it('recall with CJK query respects category filter', () => {
+    controller.store({ content: '用户喜欢暗色主题', category: 'preference', sensitivity: 'public' });
+    controller.store({ content: '暗色主题是默认设置', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('暗色主题', { category: 'preference' });
+    expect(results.length).toBe(1);
+    expect(results[0]!.category).toBe('preference');
+  });
+
+  it('recall with CJK query respects includeRestricted option', () => {
+    controller.store({ content: '受限内部文档路径', category: 'fact', sensitivity: 'restricted' });
+    controller.store({ content: '公开文档路径', category: 'fact', sensitivity: 'public' });
+
+    const publicOnly = controller.recall('文档');
+    expect(publicOnly.length).toBe(1);
+    expect(publicOnly[0]!.sensitivity).toBe('public');
+
+    const withRestricted = controller.recall('文档', { includeRestricted: true });
+    expect(withRestricted.length).toBe(2);
+  });
+
   // --- buildFtsQuery ---
 
   it('buildFtsQuery extracts unicode tokens and joins with AND', () => {
@@ -396,5 +437,15 @@ describe('MemoryController', () => {
     expect(buildFtsQuery('')).toBeNull();
     expect(buildFtsQuery('   ')).toBeNull();
     expect(buildFtsQuery('暗色模式')).toBe('"暗色模式"');
+  });
+
+  // --- containsCJK ---
+
+  it('containsCJK detects CJK characters', () => {
+    expect(containsCJK('暗色模式')).toBe(true);
+    expect(containsCJK('hello 你好')).toBe(true);
+    expect(containsCJK('TypeScript')).toBe(false);
+    expect(containsCJK('hello world')).toBe(false);
+    expect(containsCJK('')).toBe(false);
   });
 });

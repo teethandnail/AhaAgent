@@ -40,6 +40,11 @@
 | F-005 | P1   | `cancel_task` 中断执行  | 终态为 `cancelled`，锁已释放      |
 | F-006 | P1   | `browser_tool` 可见模式启动 | 返回 `ok=true` 且可执行 `snapshot` |
 | F-007 | P1   | `browser_tool` 连接无效 CDP | 返回 `ok=false` 且错误可观测       |
+| F-008 | P0   | `memory_store` 存储中文记忆后 `memory_search` 可召回 | 搜索返回包含该记忆的结果 |
+| F-009 | P0   | 同一 conversationId 内多轮对话保持历史 | LLM 可引用之前的对话内容 |
+| F-010 | P1   | 重启服务后 `memory_search` 仍可召回之前存储的记忆 | 记忆持久化，搜索返回结果 |
+| F-011 | P1   | `memory_search` 中文分词搜索（如"爱吃"搜到"喜欢吃"） | 通过 jieba 分词命中关联字词 |
+| F-012 | P1   | 记忆淘汰：超过 `AHA_MEMORY_MAX_ENTRIES` 后自动淘汰 | 低价值记忆被删除，FTS 索引同步 |
 
 ### 4.2 安全与权限
 

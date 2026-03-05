@@ -6,3 +6,4 @@ coverage/
 *.pem
 *.key
 data/
+docs/plans/

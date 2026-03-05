@@ -103,6 +103,7 @@ interface PolicyInput {
 | user      | read_file/list_dir/grep                      | 路径在工作区且不命中硬拒绝                 | allow                  |
 | assistant | read_file/list_dir/grep                      | 同上                                       | allow                  |
 | assistant | web_search/fetch_url/browser_open/extract_main_content | URL 通过安全校验且不命中硬拒绝     | allow                  |
+| assistant | memory_search/memory_store                             | 内部工具，无外部副作用             | allow                  |
 | assistant | send_to_llm                                  | 输入非 `secret`; `restricted` 已脱敏       | allow                  |
 | assistant | diff_edit/write_file/delete_file/run_command | 有效审批存在且在 scope 内                  | allow                  |
 | user      | install_extension                            | 来源可信 + 校验通过 + 用户确认权限         | allow                  |

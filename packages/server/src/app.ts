@@ -376,6 +376,7 @@ export class AhaApp {
   private extensionRunner: ExtensionRunner;
   private browserAutomation: BrowserAutomationService;
   private pendingApprovals = new Map<string, PendingApprovalContext>();
+  private conversationHistories = new Map<string, ChatMessage[]>();
 
   private db: AppDatabase | null = null;
   private sqlite: SqliteDatabase | null = null;
@@ -543,7 +544,7 @@ export class AhaApp {
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
 
     // Continue task execution asynchronously so the gateway thread stays responsive.
-    void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId, execution);
+    void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId, execution, payload.conversationId);
   }
 
   private async runLLMTask(
@@ -553,6 +554,7 @@ export class AhaApp {
     ws: WebSocket,
     traceId: string,
     execution: ExecutionContext,
+    conversationId: string,
   ): Promise<void> {
     this.logProgress('llm_task_started', { taskId, requestId });
     if (!this.llmRouter) {
@@ -569,22 +571,30 @@ export class AhaApp {
     }
 
     try {
-      const messages: ChatMessage[] = [
-        {
-          role: 'system',
-          content:
-            'You are a coding agent operating inside a local workspace. Use tools when filesystem changes or web research are requested. ' +
-            'For web tasks, prefer browser_tool(action=search/open/click_result/snapshot) for interactive browsing. ' +
-            'For fast reading, use browser_search + fetch_url and cite source URLs in your final response.\n\n' +
-            '## Memory\n\n' +
-            'You have a long-term memory system. Follow these rules:\n\n' +
-            '**Recall**: Before answering questions about prior work, decisions, dates, people, preferences, or todos, ' +
-            'call memory_search to check your memories. If low confidence after search, tell the user you checked but found nothing.\n\n' +
-            '**Store**: When the conversation reveals information worth remembering long-term ' +
-            '(user preferences, project facts, key decisions), call memory_store. Do not store temporary or one-off details.',
-        },
-        { role: 'user', content: userText },
-      ];
+      let messages = this.conversationHistories.get(conversationId);
+      if (messages) {
+        // Append the new user message to existing conversation history
+        messages.push({ role: 'user', content: userText });
+      } else {
+        // First message in this conversation – create history with system prompt
+        messages = [
+          {
+            role: 'system',
+            content:
+              'You are a coding agent operating inside a local workspace. Use tools when filesystem changes or web research are requested. ' +
+              'For web tasks, prefer browser_tool(action=search/open/click_result/snapshot) for interactive browsing. ' +
+              'For fast reading, use browser_search + fetch_url and cite source URLs in your final response.\n\n' +
+              '## Memory\n\n' +
+              'You have a long-term memory system. Follow these rules:\n\n' +
+              '**Recall**: Before answering questions about prior work, decisions, dates, people, preferences, or todos, ' +
+              'call memory_search to check your memories. If low confidence after search, tell the user you checked but found nothing.\n\n' +
+              '**Store**: When the conversation reveals information worth remembering long-term ' +
+              '(user preferences, project facts, key decisions), call memory_store. Do not store temporary or one-off details.',
+          },
+          { role: 'user', content: userText },
+        ];
+        this.conversationHistories.set(conversationId, messages);
+      }
       await this.continueAgentLoop({
         taskId,
         requestId,

@@ -63,7 +63,7 @@ npm run build
 ### 验证安装
 
 ```bash
-# 运行全部测试（当前 287 个测试用例）
+# 运行全部测试
 npm test
 
 # 类型检查
@@ -363,7 +363,7 @@ AhaAgent/
 │   │       ├── tools/           # 文件沙箱 + 工具处理
 │   │       ├── orchestrator/    # 任务状态机 + 审批 + 检查点
 │   │       ├── llm/             # LLM 路由（OpenAI-compatible）
-│   │       ├── memory/          # 记忆系统（短期+长期）
+│   │       ├── memory/          # 记忆系统（jieba 分词 + FTS5 + 上下文压缩）
 │   │       ├── logger/          # 结构化日志 + 脱敏
 │   │       ├── extensions/      # MCP 扩展安装 + 隔离运行
 │   │       └── db/              # SQLite schema + 客户端
@@ -547,6 +547,30 @@ npx playwright install chromium
 - `.npmrc` — npm 配置（可能包含 token）
 - `secrets.*` — 秘密配置文件
 
+### Q: 记忆系统是怎么工作的？
+
+AhaAgent 内置长期记忆系统，Agent 会自主决定何时读取和写入记忆：
+
+- **自动记忆**：当对话中出现值得长期保留的信息（用户偏好、项目事实、重要决策），Agent 会自动调用 `memory_store` 存储
+- **自动回忆**：当用户提问涉及历史信息时，Agent 会自动调用 `memory_search` 搜索相关记忆
+- **跨会话持久化**：记忆存储在 SQLite 数据库中（`~/.aha/aha.db`），重启服务后记忆依然保留
+- **中英文支持**：使用 `@node-rs/jieba` 分词引擎，中文按词语切分（如"喜欢"、"牛肉"），英文按单词切分
+- **上下文压缩**：当对话接近上下文窗口上限时，系统自动触发记忆存盘 + 历史消息压缩
+
+相关环境变量：
+
+```bash
+# 上下文窗口 token 上限（默认 128000）
+export AHA_CONTEXT_WINDOW=128000
+
+# 记忆条目上限，超过后自动淘汰低价值记忆（默认 500）
+export AHA_MEMORY_MAX_ENTRIES=500
+```
+
+### Q: 对话历史会保持吗？
+
+是的。同一个对话（conversationId）内的消息历史会在内存中保持，Agent 能记住你在当前对话中说过的话。重启服务后对话历史会清空，但通过记忆系统存储的长期信息会保留。
+
 ### Q: 当前版本的限制
 
 这是 V1 版本，当前已支持基础 Agent 自动循环（含工具调用与审批恢复），但仍有以下已知边界：
@@ -558,4 +582,4 @@ npx playwright install chromium
 
 ---
 
-_文档版本：V1.0 | 更新日期：2026-03-05_
+_文档版本：V1.1 | 更新日期：2026-03-06_
