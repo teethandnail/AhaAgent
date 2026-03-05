@@ -25,6 +25,7 @@ import { TaskManager } from './orchestrator/task-manager.js';
 import { ApprovalManager } from './orchestrator/approval-manager.js';
 import { CheckpointManager } from './orchestrator/checkpoint-manager.js';
 import { MemoryController } from './memory/memory-controller.js';
+import { ContextManager } from './memory/context-manager.js';
 import { MutationQueue } from './orchestrator/mutation-queue.js';
 import { FileLock } from './orchestrator/file-lock.js';
 import { Sandbox } from './tools/sandbox.js';
@@ -298,6 +299,54 @@ const CODING_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_search',
+      description:
+        'Search past memories. Must be called before answering questions about prior work, decisions, preferences, people, dates, or todos. Returns relevant memory snippets with IDs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search keywords or natural language question.' },
+          topK: { type: 'number', description: 'Max results to return. Default 5.' },
+          category: {
+            type: 'string',
+            enum: ['preference', 'fact', 'skill', 'context'],
+            description: 'Optional category filter.',
+          },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_store',
+      description:
+        'Store a piece of durable information worth remembering long-term: user preferences, project facts, key decisions, skill learnings. Do NOT store temporary or one-off details.',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'The content to remember.' },
+          category: {
+            type: 'string',
+            enum: ['preference', 'fact', 'skill', 'context'],
+            description: 'Memory category.',
+          },
+          sensitivity: {
+            type: 'string',
+            enum: ['public', 'restricted', 'secret'],
+            description: 'Sensitivity level. Defaults to public.',
+          },
+        },
+        required: ['content', 'category'],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 export interface AhaAppConfig {
@@ -317,6 +366,7 @@ export class AhaApp {
   private approvalManager: ApprovalManager;
   private checkpointManager: CheckpointManager | null = null;
   private memoryController: MemoryController | null = null;
+  private contextManager: ContextManager | null = null;
   private mutationQueue: MutationQueue;
   private fileLock: FileLock;
   private sandbox: Sandbox;
@@ -375,6 +425,9 @@ export class AhaApp {
 
     this.memoryController = new MemoryController(db, sqlite);
     this.memoryController.initSchema();
+
+    const contextWindow = parseInt(process.env.AHA_CONTEXT_WINDOW ?? '128000', 10);
+    this.contextManager = new ContextManager({ contextWindow });
 
     // 4. Start gateway with message handler
     this.gateway = createGateway({
@@ -522,7 +575,13 @@ export class AhaApp {
           content:
             'You are a coding agent operating inside a local workspace. Use tools when filesystem changes or web research are requested. ' +
             'For web tasks, prefer browser_tool(action=search/open/click_result/snapshot) for interactive browsing. ' +
-            'For fast reading, use browser_search + fetch_url and cite source URLs in your final response.',
+            'For fast reading, use browser_search + fetch_url and cite source URLs in your final response.\n\n' +
+            '## Memory\n\n' +
+            'You have a long-term memory system. Follow these rules:\n\n' +
+            '**Recall**: Before answering questions about prior work, decisions, dates, people, preferences, or todos, ' +
+            'call memory_search to check your memories. If low confidence after search, tell the user you checked but found nothing.\n\n' +
+            '**Store**: When the conversation reveals information worth remembering long-term ' +
+            '(user preferences, project facts, key decisions), call memory_store. Do not store temporary or one-off details.',
         },
         { role: 'user', content: userText },
       ];
@@ -577,6 +636,59 @@ export class AhaApp {
       params.execution.usage.steps = step + 1;
       const current = this.taskManager.getTask(params.taskId);
       if (current?.status === 'cancelled') return;
+
+      // --- Context compaction check ---
+      if (this.contextManager && this.memoryController && this.llmRouter) {
+        // Phase 1: Memory Flush
+        if (this.contextManager.needsFlush(params.messages)) {
+          this.logProgress('memory_flush_start', { taskId: params.taskId, step });
+          const flushMessages: ChatMessage[] = [
+            { role: 'system', content: this.contextManager.flushPrompt },
+            ...params.messages.slice(1),
+            { role: 'user', content: 'Store any durable memories now. Reply NO_REPLY if nothing to store.' },
+          ];
+          const flushResponse = await this.llmRouter.chat(flushMessages, params.traceId, {
+            tools: CODING_TOOLS as unknown as unknown[],
+            toolChoice: 'auto',
+          });
+          if (flushResponse.toolCalls) {
+            for (const tc of flushResponse.toolCalls) {
+              if (tc.name === 'memory_store') {
+                await this.executeToolCall(tc.name, tc.arguments, {
+                  traceId: params.traceId,
+                  taskId: params.taskId,
+                  requestId: params.requestId,
+                });
+              }
+            }
+          }
+          this.contextManager.markFlushed();
+          this.logProgress('memory_flush_done', { taskId: params.taskId, step });
+        }
+
+        // Phase 2: Compaction
+        if (this.contextManager.needsCompaction(params.messages)) {
+          this.logProgress('compaction_start', { taskId: params.taskId, step });
+          const { system, old, recent } = this.contextManager.splitForCompaction(params.messages);
+          if (old.length > 0) {
+            const summaryMessages: ChatMessage[] = [
+              { role: 'system', content: this.contextManager.compactionPrompt },
+              ...old,
+            ];
+            const summaryResponse = await this.llmRouter.chat(summaryMessages, params.traceId);
+            const summary = summaryResponse.content || '(no summary generated)';
+            params.messages = this.contextManager.buildCompactedMessages(system, summary, recent);
+            this.contextManager.resetFlushFlag();
+            this.logProgress('compaction_done', {
+              taskId: params.taskId,
+              step,
+              oldMessages: old.length,
+              newTotal: params.messages.length,
+            });
+          }
+        }
+      }
+      // --- End context compaction check ---
 
       const response = await this.llmRouter.chat(params.messages, params.traceId, {
         tools: CODING_TOOLS as unknown as unknown[],
@@ -1099,6 +1211,39 @@ export class AhaApp {
           timeoutSec,
         });
         return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.errorMessage };
+      }
+
+      case 'memory_search': {
+        if (!this.memoryController) {
+          return { ok: false, error: 'Memory system not initialized.' };
+        }
+        const msQuery = typeof args.query === 'string' ? args.query : '';
+        const msTopK = typeof args.topK === 'number' ? args.topK : 5;
+        const msCategory = typeof args.category === 'string' ? args.category : undefined;
+        const msResults = this.memoryController.recall(msQuery, { topK: msTopK, category: msCategory });
+        return {
+          ok: true,
+          output: JSON.stringify(
+            msResults.map((m) => ({ id: m.id, content: m.content, category: m.category })),
+          ),
+        };
+      }
+
+      case 'memory_store': {
+        if (!this.memoryController) {
+          return { ok: false, error: 'Memory system not initialized.' };
+        }
+        const mContent = typeof args.content === 'string' ? args.content : '';
+        const mCategory = typeof args.category === 'string' ? args.category : 'fact';
+        const mSensitivity = typeof args.sensitivity === 'string' ? args.sensitivity : 'public';
+        const mEntry = this.memoryController.store({
+          content: mContent,
+          category: mCategory as 'preference' | 'fact' | 'skill' | 'context',
+          sensitivity: mSensitivity as 'public' | 'restricted' | 'secret',
+        });
+        const maxEntries = parseInt(process.env.AHA_MEMORY_MAX_ENTRIES ?? '500', 10);
+        this.memoryController.evict(maxEntries);
+        return { ok: true, output: JSON.stringify({ id: mEntry.id }) };
       }
 
       default:
