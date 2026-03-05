@@ -3,7 +3,7 @@ import type { Database as SqliteDatabase } from 'better-sqlite3';
 import { eq, sql } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import { memories } from '../db/schema.js';
-import { recallMemories, type RecallOptions } from './recall.js';
+import { recallWithFts, type RecallOptions } from './recall.js';
 
 export interface MemoryEntry {
   id: string;
@@ -30,6 +30,16 @@ const CREATE_MEMORIES_TABLE_SQL = `
   );
 `;
 
+const CREATE_MEMORIES_FTS_SQL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    id UNINDEXED,
+    category UNINDEXED,
+    sensitivity UNINDEXED,
+    tokenize='trigram'
+  );
+`;
+
 export class MemoryController {
   /** Short-term: in-memory session cache */
   private sessionCache: Map<string, MemoryEntry>;
@@ -43,9 +53,10 @@ export class MemoryController {
     this.sessionCache = new Map();
   }
 
-  /** Create the memories table if it does not already exist. */
+  /** Create the memories table and FTS5 index if they do not already exist. */
   initSchema(): void {
     this.sqlite.exec(CREATE_MEMORIES_TABLE_SQL);
+    this.sqlite.exec(CREATE_MEMORIES_FTS_SQL);
   }
 
   /** Store a new memory. Returns the created MemoryEntry with auto-generated id and timestamps. */
@@ -81,34 +92,42 @@ export class MemoryController {
       })
       .run();
 
+    // Sync to FTS index
+    this.sqlite
+      .prepare('INSERT INTO memories_fts(content, id, category, sensitivity) VALUES (?, ?, ?, ?)')
+      .run(memoryEntry.content, memoryEntry.id, memoryEntry.category, memoryEntry.sensitivity);
+
     return memoryEntry;
   }
 
   /**
    * Recall memories by relevance (TopK, non-sensitive only).
-   * Uses keyword-based scoring. Increments accessCount and updates lastAccessedAt on results.
+   * Uses FTS5 BM25 ranking. Increments accessCount and updates lastAccessedAt on results.
    */
   recall(query: string, options?: RecallOptions): MemoryEntry[] {
-    // Load all memories from DB
-    const rows = this.db.select().from(memories).all();
-    const allMemories = rows.map((row) => this.rowToEntry(row));
+    const rows = recallWithFts(this.sqlite, query, options);
 
-    // Apply recall strategy
-    const results = recallMemories(allMemories, query, options);
-
-    // Update access count and lastAccessedAt for returned memories
     const now = new Date().toISOString();
-    for (const mem of results) {
-      mem.accessCount++;
-      mem.lastAccessedAt = now;
+    const results: MemoryEntry[] = [];
+
+    for (const row of rows) {
+      // Get full entry from drizzle
+      const entry = this.get(row.id);
+      if (!entry) continue;
+
+      entry.accessCount++;
+      entry.lastAccessedAt = now;
+
       this.db
         .update(memories)
         .set({
           accessCount: sql`${memories.accessCount} + 1`,
           lastAccessedAt: now,
         })
-        .where(eq(memories.id, mem.id))
+        .where(eq(memories.id, entry.id))
         .run();
+
+      results.push(entry);
     }
 
     return results;
@@ -147,6 +166,15 @@ export class MemoryController {
 
     this.db.update(memories).set(setValues).where(eq(memories.id, id)).run();
 
+    // Sync FTS index on content/category/sensitivity changes
+    if (updates.content !== undefined || updates.category !== undefined || updates.sensitivity !== undefined) {
+      this.sqlite.prepare('DELETE FROM memories_fts WHERE id = ?').run(id);
+      const updated = this.get(id)!;
+      this.sqlite
+        .prepare('INSERT INTO memories_fts(content, id, category, sensitivity) VALUES (?, ?, ?, ?)')
+        .run(updated.content, updated.id, updated.category, updated.sensitivity);
+    }
+
     return this.get(id);
   }
 
@@ -154,6 +182,8 @@ export class MemoryController {
   delete(id: string): boolean {
     const existing = this.get(id);
     if (!existing) return false;
+    // Sync FTS index before deleting
+    this.sqlite.prepare('DELETE FROM memories_fts WHERE id = ?').run(id);
     this.db.delete(memories).where(eq(memories.id, id)).run();
     return true;
   }
@@ -214,6 +244,8 @@ export class MemoryController {
     const evictIds = scored.slice(0, toEvict).map((s) => s.id);
 
     for (const evictId of evictIds) {
+      // Sync FTS index before deleting
+      this.sqlite.prepare('DELETE FROM memories_fts WHERE id = ?').run(evictId);
       this.db.delete(memories).where(eq(memories.id, evictId)).run();
     }
 

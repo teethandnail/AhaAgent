@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from '../db/schema.js';
 import { MemoryController } from './memory-controller.js';
+import { buildFtsQuery } from './recall.js';
 
 function createInMemoryDb() {
   const sqlite = new Database(':memory:');
@@ -274,5 +275,126 @@ describe('MemoryController', () => {
     // m4 and m5 should have been evicted
     expect(controller.get(m4.id)).toBeNull();
     expect(controller.get(m5.id)).toBeNull();
+  });
+
+  // --- FTS5 schema ---
+
+  it('initSchema creates memories_fts virtual table', () => {
+    const tables = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const tableNames = tables.map((t) => t.name);
+    expect(tableNames).toContain('memories_fts');
+  });
+
+  // --- FTS sync: store ---
+
+  it('store syncs to FTS index', () => {
+    controller.store({ content: 'TypeScript is great', category: 'fact', sensitivity: 'public' });
+
+    const ftsRows = sqlite
+      .prepare("SELECT id, content FROM memories_fts WHERE memories_fts MATCH '\"TypeScript\"'")
+      .all() as Array<{ id: string; content: string }>;
+
+    expect(ftsRows.length).toBe(1);
+    expect(ftsRows[0]!.content).toContain('TypeScript');
+  });
+
+  // --- FTS sync: update ---
+
+  it('update syncs FTS index', () => {
+    const entry = controller.store({ content: 'old content alpha', category: 'fact', sensitivity: 'public' });
+    controller.update(entry.id, { content: 'new content beta' });
+
+    const oldRows = sqlite
+      .prepare("SELECT id FROM memories_fts WHERE memories_fts MATCH '\"alpha\"'")
+      .all();
+    expect(oldRows.length).toBe(0);
+
+    const newRows = sqlite
+      .prepare("SELECT id FROM memories_fts WHERE memories_fts MATCH '\"beta\"'")
+      .all();
+    expect(newRows.length).toBe(1);
+  });
+
+  // --- FTS sync: delete ---
+
+  it('delete syncs FTS index', () => {
+    const entry = controller.store({ content: 'gamma content', category: 'fact', sensitivity: 'public' });
+    controller.delete(entry.id);
+
+    const rows = sqlite
+      .prepare("SELECT id FROM memories_fts WHERE memories_fts MATCH '\"gamma\"'")
+      .all();
+    expect(rows.length).toBe(0);
+  });
+
+  // --- FTS sync: evict ---
+
+  it('evict syncs FTS index', () => {
+    controller.store({ content: 'evict-aaa', category: 'fact', sensitivity: 'public' });
+    controller.store({ content: 'evict-bbb', category: 'fact', sensitivity: 'public' });
+    controller.store({ content: 'keep-ccc', category: 'fact', sensitivity: 'public' });
+    // Access keep-ccc to raise its value score
+    controller.recall('keep-ccc');
+    controller.recall('keep-ccc');
+
+    controller.evict(1);
+
+    const remaining = sqlite
+      .prepare('SELECT id FROM memories_fts')
+      .all();
+    expect(remaining.length).toBe(1);
+  });
+
+  // --- FTS5 BM25 recall ---
+
+  it('recall uses FTS5 BM25 for ranking', () => {
+    controller.store({ content: 'TypeScript strict mode is enabled in this project', category: 'fact', sensitivity: 'public' });
+    controller.store({ content: 'Python is used for scripting', category: 'fact', sensitivity: 'public' });
+    controller.store({ content: 'TypeScript and React are the frontend stack', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('TypeScript');
+    expect(results.length).toBe(2);
+    for (const r of results) {
+      expect(r.content.toLowerCase()).toContain('typescript');
+    }
+  });
+
+  it('recall with Chinese query works', () => {
+    controller.store({ content: '用户喜欢暗色模式', category: 'preference', sensitivity: 'public' });
+    controller.store({ content: '项目使用React框架', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('暗色模式');
+    expect(results.length).toBe(1);
+    expect(results[0]!.content).toContain('暗色模式');
+  });
+
+  it('recall with sensitivity filter excludes secret from FTS results', () => {
+    controller.store({ content: 'Secret database password is hunter2', category: 'fact', sensitivity: 'secret' });
+    controller.store({ content: 'Public database host is localhost', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('database');
+    expect(results.length).toBe(1);
+    expect(results[0]!.sensitivity).toBe('public');
+  });
+
+  it('recall with category filter returns only matching category', () => {
+    controller.store({ content: 'User prefers dark theme', category: 'preference', sensitivity: 'public' });
+    controller.store({ content: 'Dark theme is the default setting', category: 'fact', sensitivity: 'public' });
+
+    const results = controller.recall('dark theme', { category: 'preference' });
+    expect(results.length).toBe(1);
+    expect(results[0]!.category).toBe('preference');
+  });
+
+  // --- buildFtsQuery ---
+
+  it('buildFtsQuery extracts unicode tokens and joins with AND', () => {
+    expect(buildFtsQuery('TypeScript React')).toBe('"TypeScript" AND "React"');
+    expect(buildFtsQuery('hello world')).toBe('"hello" AND "world"');
+    expect(buildFtsQuery('')).toBeNull();
+    expect(buildFtsQuery('   ')).toBeNull();
+    expect(buildFtsQuery('暗色模式')).toBe('"暗色模式"');
   });
 });

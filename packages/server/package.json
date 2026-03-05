@@ -8,6 +8,7 @@
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
     "playwright": "^1.58.2",
+    "tiktoken": "^1.0.22",
     "ws": "^8.19.0"
   },
   "scripts": {

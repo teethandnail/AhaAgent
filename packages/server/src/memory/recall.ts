@@ -1,67 +1,73 @@
-import type { MemoryEntry } from './memory-controller.js';
+import type { Database as SqliteDatabase } from 'better-sqlite3';
 
 export interface RecallOptions {
   topK?: number;
   includeRestricted?: boolean;
+  category?: string;
 }
 
 /**
- * Score a memory against a query using simple keyword-based relevance.
- * Returns the count of distinct query words that appear in the memory content (case-insensitive).
+ * Build an FTS5 MATCH query from a raw user query string.
+ * Extracts unicode word tokens, wraps each in quotes, joins with AND.
+ * Returns null if no valid tokens are found.
  */
-export function scoreMemory(query: string, content: string): number {
-  const queryWords = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 0);
-  const lowerContent = content.toLowerCase();
+export function buildFtsQuery(raw: string): string | null {
+  const tokens = raw
+    .match(/[\p{L}\p{N}_]+/gu)
+    ?.map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (!tokens || tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"`).join(' AND ');
+}
 
-  let score = 0;
-  for (const word of queryWords) {
-    if (lowerContent.includes(word)) {
-      score++;
-    }
-  }
-  return score;
+export interface FtsRecallRow {
+  id: string;
+  content: string;
+  category: string;
+  sensitivity: string;
+  rank: number;
 }
 
 /**
- * Filter, score, sort, and return the top-K memories matching a query.
- *
- * - Sensitivity filter: never returns 'secret' memories.
- *   Returns 'public' by default; also 'restricted' if includeRestricted is true.
- * - Scoring: count of query words found in memory content (case-insensitive).
- * - Sort: by score descending, then by accessCount descending.
- * - Returns at most topK results (default 5).
+ * Recall memories using FTS5 MATCH with BM25 ranking.
+ * Supports sensitivity filtering (always excludes 'secret', optionally excludes 'restricted')
+ * and optional category filtering.
  */
-export function recallMemories(
-  memories: MemoryEntry[],
+export function recallWithFts(
+  sqlite: SqliteDatabase,
   query: string,
   options: RecallOptions = {},
-): MemoryEntry[] {
-  const { topK = 5, includeRestricted = false } = options;
+): FtsRecallRow[] {
+  const { topK = 5, includeRestricted = false, category } = options;
 
-  // Filter by sensitivity
-  const filtered = memories.filter((m) => {
-    if (m.sensitivity === 'secret') return false;
-    if (m.sensitivity === 'restricted' && !includeRestricted) return false;
-    return true;
-  });
+  const ftsQuery = buildFtsQuery(query);
+  if (!ftsQuery) return [];
 
-  // Score each memory
-  const scored = filtered.map((m) => ({
-    memory: m,
-    score: scoreMemory(query, m.content),
-  }));
+  // Build WHERE clauses
+  const conditions: string[] = ['memories_fts MATCH ?'];
+  const params: (string | number)[] = [ftsQuery];
 
-  // Only include memories with a positive score
-  const matched = scored.filter((s) => s.score > 0);
+  // Sensitivity filter: always exclude secret
+  conditions.push("sensitivity != 'secret'");
+  if (!includeRestricted) {
+    conditions.push("sensitivity != 'restricted'");
+  }
 
-  // Sort by score descending, then accessCount descending
-  matched.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return b.memory.accessCount - a.memory.accessCount;
-  });
+  // Category filter
+  if (category) {
+    conditions.push('category = ?');
+    params.push(category);
+  }
 
-  return matched.slice(0, topK).map((s) => s.memory);
+  params.push(topK);
+
+  const sql = `
+    SELECT id, content, category, sensitivity, bm25(memories_fts) AS rank
+    FROM memories_fts
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY rank ASC
+    LIMIT ?
+  `;
+
+  return sqlite.prepare(sql).all(...params) as FtsRecallRow[];
 }
