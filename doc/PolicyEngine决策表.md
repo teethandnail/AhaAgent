@@ -91,6 +91,11 @@ interface PolicyInput {
 - 未超过 `maxActions`。
 - 当前时间早于 `expiresAt`。
 
+运行模式补充：
+
+- `interactive`：严格按上述审批规则执行。
+- `autonomous`：在编排层可对 `write_file/delete_file/run_command` 做自动放行，但硬拒绝规则仍必须生效。
+
 ## 6. 允许规则矩阵
 
 | actor     | action                                       | 条件                                       | 决策                   |

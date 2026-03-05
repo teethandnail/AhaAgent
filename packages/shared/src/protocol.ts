@@ -16,6 +16,14 @@ export interface SendMessagePayload {
   text: string;
   model?: string;
   contextRefs?: string[];
+  execution?: {
+    mode?: ExecutionMode;
+    budget?: {
+      maxSteps?: number;
+      maxWrites?: number;
+      maxCommands?: number;
+    };
+  };
 }
 
 export interface ApproveActionPayload {
@@ -48,6 +56,15 @@ export interface TaskStatusChangePayload {
   desc: string;
   stepId?: string;
   progress?: { current: number; total: number };
+  mode?: ExecutionMode;
+  budget?: {
+    stepsUsed: number;
+    stepsLimit: number;
+    writesUsed: number;
+    writesLimit?: number;
+    commandsUsed: number;
+    commandsLimit?: number;
+  };
 }
 
 export interface ActionBlockedPayload {
@@ -85,6 +102,7 @@ export type TaskState =
   | 'success'
   | 'failed'
   | 'cancelled';
+export type ExecutionMode = 'interactive' | 'autonomous';
 export type RiskLevel = 'medium' | 'high' | 'critical';
 export type ApprovalActionType =
   | 'write_file'

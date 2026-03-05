@@ -10,6 +10,7 @@ import {
   type CancelTaskPayload,
   type ApprovalActionType,
   type RiskLevel,
+  type ExecutionMode,
   type StreamChunkPayload,
   type TaskStatusChangePayload,
   type TaskTerminalPayload,
@@ -43,6 +44,8 @@ import { evaluate } from './policy/policy-engine.js';
 import type { Database as SqliteDatabase } from 'better-sqlite3';
 
 const MAX_TOOL_STEPS = 8;
+const AUTONOMOUS_DEFAULT_MAX_STEPS = 16;
+const DEFAULT_MODE: ExecutionMode = 'interactive';
 
 interface ToolCallRequest {
   id: string;
@@ -58,6 +61,23 @@ interface PendingApprovalContext {
   messages: ChatMessage[];
   step: number;
   toolCall: ToolCallRequest;
+  execution: ExecutionContext;
+}
+
+interface RuntimeBudget {
+  maxSteps: number;
+  maxWrites?: number;
+  maxCommands?: number;
+}
+
+interface ExecutionContext {
+  mode: ExecutionMode;
+  budget: RuntimeBudget;
+  usage: {
+    steps: number;
+    writes: number;
+    commands: number;
+  };
 }
 
 const CODING_TOOLS = [
@@ -431,6 +451,7 @@ export class AhaApp {
     traceId: string,
   ): void {
     const { payload } = envelope;
+    const execution = this.resolveExecutionContext(payload);
 
     // Create a task
     const task = this.taskManager.createTask(payload.text);
@@ -462,12 +483,14 @@ export class AhaApp {
       taskId: task.id,
       state: task.status,
       desc: `Task created: ${payload.text}`,
+      mode: execution.mode,
+      budget: this.toBudgetPayload(execution),
     };
 
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
 
     // Continue task execution asynchronously so the gateway thread stays responsive.
-    void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId);
+    void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId, execution);
   }
 
   private async runLLMTask(
@@ -476,6 +499,7 @@ export class AhaApp {
     requestId: string,
     ws: WebSocket,
     traceId: string,
+    execution: ExecutionContext,
   ): Promise<void> {
     this.logProgress('llm_task_started', { taskId, requestId });
     if (!this.llmRouter) {
@@ -509,6 +533,7 @@ export class AhaApp {
         ws,
         messages,
         startStep: 0,
+        execution,
       });
     } catch (error: unknown) {
       const current = this.taskManager.getTask(taskId);
@@ -544,10 +569,12 @@ export class AhaApp {
     ws: WebSocket;
     messages: ChatMessage[];
     startStep: number;
+    execution: ExecutionContext;
   }): Promise<void> {
     if (!this.llmRouter) return;
-
-    for (let step = params.startStep; step < MAX_TOOL_STEPS; step++) {
+    const stepsLimit = params.execution.budget.maxSteps;
+    for (let step = params.startStep; step < stepsLimit; step++) {
+      params.execution.usage.steps = step + 1;
       const current = this.taskManager.getTask(params.taskId);
       if (current?.status === 'cancelled') return;
 
@@ -559,6 +586,7 @@ export class AhaApp {
         taskId: params.taskId,
         step,
         toolCalls: response.toolCalls?.length ?? 0,
+        mode: params.execution.mode,
       });
 
       if (response.toolCalls && response.toolCalls.length > 0) {
@@ -606,6 +634,46 @@ export class AhaApp {
           }
 
           if (policyResult.decision === 'require_approval') {
+            const action = this.toPolicyAction(tc.name);
+            if (this.canAutoApproveInAutonomousMode(params.execution.mode, action)) {
+              const budgetOk = this.consumeMutationBudget(tc.name, params.execution);
+              if (!budgetOk.ok) {
+                this.taskManager.transition(params.taskId, 'failed');
+                this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
+                  taskId: params.taskId,
+                  state: 'failed',
+                  summary: budgetOk.reason,
+                  errorCode: 'AHA-POLICY-001',
+                } satisfies TaskTerminalPayload);
+                this.logProgress('task_failed', { taskId: params.taskId, reason: budgetOk.reason });
+                return;
+              }
+              this.logProgress('tool_auto_approved', {
+                taskId: params.taskId,
+                step,
+                tool: tc.name,
+                mode: params.execution.mode,
+              });
+              const autoResult = await this.executeToolCall(tc.name, tc.arguments, {
+                traceId: params.traceId,
+                taskId: params.taskId,
+                requestId: params.requestId,
+              });
+              this.logProgress('tool_result', {
+                taskId: params.taskId,
+                step,
+                tool: tc.name,
+                ok: autoResult.ok === true,
+                error: typeof autoResult.error === 'string' ? autoResult.error : undefined,
+                mode: params.execution.mode,
+              });
+              params.messages.push({
+                role: 'tool',
+                toolCallId: tc.id,
+                content: JSON.stringify(autoResult),
+              });
+              continue;
+            }
             const task = this.taskManager.getTask(params.taskId);
             if (task && task.status === 'running') {
               this.taskManager.transition(task.id, 'blocked');
@@ -613,6 +681,8 @@ export class AhaApp {
                 taskId: task.id,
                 state: 'blocked',
                 desc: `Waiting for approval: ${tc.name}`,
+                mode: params.execution.mode,
+                budget: this.toBudgetPayload(params.execution),
               } satisfies TaskStatusChangePayload);
             }
 
@@ -636,6 +706,7 @@ export class AhaApp {
               messages: params.messages,
               step,
               toolCall: tc,
+              execution: params.execution,
             });
 
             const blockedPayload = this.approvalManager.toBlockedPayload(approval);
@@ -646,6 +717,19 @@ export class AhaApp {
               action: tc.name,
               target: this.describeToolTarget(tc.name, tc.arguments),
             });
+            return;
+          }
+
+          const budgetOk = this.consumeMutationBudget(tc.name, params.execution);
+          if (!budgetOk.ok) {
+            this.taskManager.transition(params.taskId, 'failed');
+            this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
+              taskId: params.taskId,
+              state: 'failed',
+              summary: budgetOk.reason,
+              errorCode: 'AHA-POLICY-001',
+            } satisfies TaskTerminalPayload);
+            this.logProgress('task_failed', { taskId: params.taskId, reason: budgetOk.reason });
             return;
           }
 
@@ -690,12 +774,12 @@ export class AhaApp {
     this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
       taskId: params.taskId,
       state: 'failed',
-      summary: `Task aborted after exceeding ${MAX_TOOL_STEPS.toString()} tool iterations.`,
+      summary: `Task aborted after exceeding ${stepsLimit.toString()} tool iterations.`,
       errorCode: 'AHA-LLM-002',
     } satisfies TaskTerminalPayload);
     this.logProgress('task_failed', {
       taskId: params.taskId,
-      reason: `exceeded ${MAX_TOOL_STEPS.toString()} steps`,
+      reason: `exceeded ${stepsLimit.toString()} steps`,
     });
   }
 
@@ -1085,6 +1169,90 @@ export class AhaApp {
     return toolName;
   }
 
+  private resolveExecutionContext(payload: SendMessagePayload): ExecutionContext {
+    const mode = payload.execution?.mode === 'autonomous' ? 'autonomous' : DEFAULT_MODE;
+    const maxStepsRaw = payload.execution?.budget?.maxSteps;
+    const maxWritesRaw = payload.execution?.budget?.maxWrites;
+    const maxCommandsRaw = payload.execution?.budget?.maxCommands;
+
+    const maxSteps =
+      typeof maxStepsRaw === 'number' && Number.isFinite(maxStepsRaw)
+        ? Math.max(1, Math.min(64, Math.floor(maxStepsRaw)))
+        : mode === 'autonomous'
+          ? AUTONOMOUS_DEFAULT_MAX_STEPS
+          : MAX_TOOL_STEPS;
+    const maxWrites =
+      typeof maxWritesRaw === 'number' && Number.isFinite(maxWritesRaw)
+        ? Math.max(1, Math.min(200, Math.floor(maxWritesRaw)))
+        : undefined;
+    const maxCommands =
+      typeof maxCommandsRaw === 'number' && Number.isFinite(maxCommandsRaw)
+        ? Math.max(1, Math.min(200, Math.floor(maxCommandsRaw)))
+        : undefined;
+
+    return {
+      mode,
+      budget: { maxSteps, maxWrites, maxCommands },
+      usage: { steps: 0, writes: 0, commands: 0 },
+    };
+  }
+
+  private toBudgetPayload(execution: ExecutionContext): TaskStatusChangePayload['budget'] {
+    return {
+      stepsUsed: execution.usage.steps,
+      stepsLimit: execution.budget.maxSteps,
+      writesUsed: execution.usage.writes,
+      writesLimit: execution.budget.maxWrites,
+      commandsUsed: execution.usage.commands,
+      commandsLimit: execution.budget.maxCommands,
+    };
+  }
+
+  private canAutoApproveInAutonomousMode(mode: ExecutionMode, action: PolicyAction): boolean {
+    if (mode !== 'autonomous') return false;
+    return action === 'write_file' || action === 'delete_file' || action === 'run_command';
+  }
+
+  private consumeMutationBudget(
+    toolName: string,
+    execution: ExecutionContext,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (toolName === 'run_command') {
+      execution.usage.commands += 1;
+      if (
+        typeof execution.budget.maxCommands === 'number' &&
+        execution.usage.commands > execution.budget.maxCommands
+      ) {
+        return {
+          ok: false,
+          reason: `Execution budget exceeded: commands ${execution.usage.commands.toString()}/${execution.budget.maxCommands.toString()}`,
+        };
+      }
+      return { ok: true };
+    }
+
+    if (
+      toolName === 'create_dir' ||
+      toolName === 'write_file' ||
+      toolName === 'diff_edit' ||
+      toolName === 'delete_file'
+    ) {
+      execution.usage.writes += 1;
+      if (
+        typeof execution.budget.maxWrites === 'number' &&
+        execution.usage.writes > execution.budget.maxWrites
+      ) {
+        return {
+          ok: false,
+          reason: `Execution budget exceeded: writes ${execution.usage.writes.toString()}/${execution.budget.maxWrites.toString()}`,
+        };
+      }
+      return { ok: true };
+    }
+
+    return { ok: true };
+  }
+
   private evaluateToolPolicy(
     toolName: string,
     rawArgs: string,
@@ -1191,6 +1359,8 @@ export class AhaApp {
         taskId: task.id,
         state: task.status,
         desc: 'Task resumed after approval',
+        mode: pending.execution.mode,
+        budget: this.toBudgetPayload(pending.execution),
       };
 
       this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
@@ -1237,6 +1407,7 @@ export class AhaApp {
         ws: pending.ws,
         messages: pending.messages,
         startStep: pending.step + 1,
+        execution: pending.execution,
       });
     })().catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';

@@ -5,6 +5,7 @@ import type {
   TaskStatusChangePayload,
   ActionBlockedPayload,
   TaskTerminalPayload,
+  ExecutionMode,
 } from '@aha-agent/shared';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -39,11 +40,13 @@ interface WebSocketState {
   messages: Message[];
   pendingApproval: PendingApproval | null;
   taskState: string;
+  executionMode: ExecutionMode;
   sessionId: string;
   rawMessages: RawWsMessage[];
   connect: (url: string) => void;
   disconnect: () => void;
   sendMessage: (text: string) => void;
+  setExecutionMode: (mode: ExecutionMode) => void;
   approve: (approvalId: string, nonce: string, decision: 'approve' | 'reject') => void;
   cancelTask: (taskId: string) => void;
 }
@@ -54,6 +57,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
   messages: [],
   pendingApproval: null,
   taskState: 'idle',
+  executionMode: 'interactive',
   sessionId: crypto.randomUUID(),
   rawMessages: [],
 
@@ -150,7 +154,13 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       idempotencyKey: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       type: 'send_message',
-      payload: { conversationId: 'main', text },
+      payload: {
+        conversationId: 'main',
+        text,
+        execution: {
+          mode: get().executionMode,
+        },
+      },
     });
     set((state) => ({
       rawMessages: [
@@ -159,6 +169,10 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       ],
     }));
     socket.send(envelope);
+  },
+
+  setExecutionMode: (mode: ExecutionMode) => {
+    set({ executionMode: mode });
   },
 
   approve: (approvalId: string, nonce: string, decision: 'approve' | 'reject') => {

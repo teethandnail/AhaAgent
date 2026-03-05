@@ -9,12 +9,15 @@ import type {
   WsEnvelope,
   TaskStatusChangePayload,
   TaskTerminalPayload,
+  ExecutionMode,
 } from '@aha-agent/shared';
 
 export default function App() {
   const [devConsoleOpen, setDevConsoleOpen] = useState(false);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   const connect = useWebSocketStore((s) => s.connect);
+  const executionMode = useWebSocketStore((s) => s.executionMode);
+  const setExecutionMode = useWebSocketStore((s) => s.setExecutionMode);
   const rawMessages = useWebSocketStore((s) => s.rawMessages);
   const updateTask = useTaskStore((s) => s.updateTask);
   const completeTask = useTaskStore((s) => s.completeTask);
@@ -85,31 +88,42 @@ export default function App() {
         style={{ borderColor: 'var(--border)' }}
       >
         <h1 className="text-lg font-semibold">AhaAgent</h1>
-        <button
-          onClick={() => setTaskPanelOpen((o) => !o)}
-          className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border transition-colors hover:opacity-80"
-          style={{
-            borderColor: 'var(--border)',
-            color: 'var(--foreground)',
-          }}
-        >
-          <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2 3.5A1.5 1.5 0 013.5 2h9A1.5 1.5 0 0114 3.5v9a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5v-9zM3.5 3a.5.5 0 00-.5.5v9a.5.5 0 00.5.5h9a.5.5 0 00.5-.5v-9a.5.5 0 00-.5-.5h-9z" />
-            <path d="M7 5.5a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4a.5.5 0 01-.5-.5zM7 8a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4A.5.5 0 017 8zm0 2.5a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4a.5.5 0 01-.5-.5zM4.5 5h1v1h-1V5zm0 2.5h1v1h-1v-1zm0 2.5h1v1h-1v-1z" />
-          </svg>
-          Tasks
-          {taskCount > 0 && (
-            <span
-              className="text-xs font-medium px-1.5 py-0.5 rounded-full"
-              style={{
-                backgroundColor: 'var(--muted)',
-                color: 'var(--muted-foreground)',
-              }}
-            >
-              {taskCount}
-            </span>
-          )}
-        </button>
+        <div className="flex items-center gap-2">
+          <select
+            value={executionMode}
+            onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}
+            className="text-sm rounded-md border px-2 py-1.5"
+            style={{ borderColor: 'var(--border)', backgroundColor: 'var(--background)' }}
+          >
+            <option value="interactive">Interactive</option>
+            <option value="autonomous">Autonomous</option>
+          </select>
+          <button
+            onClick={() => setTaskPanelOpen((o) => !o)}
+            className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border transition-colors hover:opacity-80"
+            style={{
+              borderColor: 'var(--border)',
+              color: 'var(--foreground)',
+            }}
+          >
+            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M2 3.5A1.5 1.5 0 013.5 2h9A1.5 1.5 0 0114 3.5v9a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5v-9zM3.5 3a.5.5 0 00-.5.5v9a.5.5 0 00.5.5h9a.5.5 0 00.5-.5v-9a.5.5 0 00-.5-.5h-9z" />
+              <path d="M7 5.5a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4a.5.5 0 01-.5-.5zM7 8a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4A.5.5 0 017 8zm0 2.5a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4a.5.5 0 01-.5-.5zM4.5 5h1v1h-1V5zm0 2.5h1v1h-1v-1zm0 2.5h1v1h-1v-1z" />
+            </svg>
+            Tasks
+            {taskCount > 0 && (
+              <span
+                className="text-xs font-medium px-1.5 py-0.5 rounded-full"
+                style={{
+                  backgroundColor: 'var(--muted)',
+                  color: 'var(--muted-foreground)',
+                }}
+              >
+                {taskCount}
+              </span>
+            )}
+          </button>
+        </div>
       </header>
 
       {/* Main content with optional task panel */}

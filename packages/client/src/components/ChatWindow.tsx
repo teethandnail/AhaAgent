@@ -12,7 +12,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
 export function ChatWindow() {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { messages, status, sendMessage } = useWebSocketStore();
+  const { messages, status, sendMessage, executionMode } = useWebSocketStore();
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -41,6 +41,12 @@ export function ChatWindow() {
         <span className={cn('w-2 h-2 rounded-full', statusInfo.color)} />
         <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
           {statusInfo.label}
+        </span>
+        <span
+          className="text-xs px-2 py-0.5 rounded-full border"
+          style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}
+        >
+          Mode: {executionMode}
         </span>
       </div>
 
