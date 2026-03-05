@@ -8,10 +8,13 @@ import {
   type SendMessagePayload,
   type ApproveActionPayload,
   type CancelTaskPayload,
+  type ApprovalActionType,
+  type RiskLevel,
   type StreamChunkPayload,
   type TaskStatusChangePayload,
   type TaskTerminalPayload,
   type ErrorPayload,
+  type PolicyAction,
   ClientEvents,
   ServerEvents,
 } from '@aha-agent/shared';
@@ -32,10 +35,28 @@ import { ExtensionRunner } from './extensions/runner.js';
 import { readFile } from './tools/read-file.js';
 import { listDir } from './tools/list-dir.js';
 import { computeFileVersion } from './tools/file-version.js';
+import { runCommand } from './tools/run-command.js';
+import { evaluate } from './policy/policy-engine.js';
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
 
 const MAX_TOOL_STEPS = 8;
+
+interface ToolCallRequest {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+interface PendingApprovalContext {
+  taskId: string;
+  requestId: string;
+  traceId: string;
+  ws: WebSocket;
+  messages: ChatMessage[];
+  step: number;
+  toolCall: ToolCallRequest;
+}
 
 const CODING_TOOLS = [
   {
@@ -99,6 +120,67 @@ const CODING_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'diff_edit',
+      description: 'Apply targeted text replacements in a file with optional version precondition.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+          expectedVersion: { type: 'string', description: 'Optional version hash precondition.' },
+          hunks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                oldText: { type: 'string' },
+                newText: { type: 'string' },
+              },
+              required: ['oldText', 'newText'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['path', 'hunks'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description: 'Delete a file in the workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Run a shell command in the workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          args: { type: 'array', items: { type: 'string' } },
+          cwd: { type: 'string' },
+          timeoutSec: { type: 'number' },
+        },
+        required: ['command'],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 export interface AhaAppConfig {
@@ -124,6 +206,7 @@ export class AhaApp {
   private llmRouter: LLMRouter | null = null;
   private extensionInstaller: ExtensionInstaller;
   private extensionRunner: ExtensionRunner;
+  private pendingApprovals = new Map<string, PendingApprovalContext>();
 
   private db: AppDatabase | null = null;
   private sqlite: SqliteDatabase | null = null;
@@ -197,6 +280,8 @@ export class AhaApp {
   }
 
   async stop(): Promise<void> {
+    this.pendingApprovals.clear();
+
     // 1. Stop all extensions
     await this.extensionRunner.stopAll();
 
@@ -307,68 +392,14 @@ export class AhaApp {
         },
         { role: 'user', content: userText },
       ];
-
-      for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-        const response = await this.llmRouter.chat(messages, traceId, {
-          tools: CODING_TOOLS as unknown as unknown[],
-          toolChoice: 'auto',
-        });
-
-        const current = this.taskManager.getTask(taskId);
-        if (current?.status === 'cancelled') {
-          return;
-        }
-
-        if (response.toolCalls && response.toolCalls.length > 0) {
-          messages.push({
-            role: 'assistant',
-            content: response.content || '',
-            toolCalls: response.toolCalls.map((tc) => ({
-              id: tc.id,
-              type: 'function',
-              function: {
-                name: tc.name,
-                arguments: tc.arguments,
-              },
-            })),
-          });
-
-          for (const tc of response.toolCalls) {
-            const toolResult = await this.executeToolCall(tc.name, tc.arguments);
-            messages.push({
-              role: 'tool',
-              toolCallId: tc.id,
-              content: JSON.stringify(toolResult),
-            });
-          }
-
-          continue;
-        }
-
-        const chunkPayload: StreamChunkPayload = {
-          taskId,
-          chunk: response.content || '(empty response)',
-          isFinal: true,
-        };
-        this.sendEnvelope(ws, requestId, ServerEvents.STREAM_CHUNK, chunkPayload);
-
-        this.taskManager.transition(taskId, 'success');
-        const terminalPayload: TaskTerminalPayload = {
-          taskId,
-          state: 'success',
-          summary: 'Task completed',
-        };
-        this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
-        return;
-      }
-
-      this.taskManager.transition(taskId, 'failed');
-      this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, {
+      await this.continueAgentLoop({
         taskId,
-        state: 'failed',
-        summary: `Task aborted after exceeding ${MAX_TOOL_STEPS.toString()} tool iterations.`,
-        errorCode: 'AHA-LLM-002',
-      } satisfies TaskTerminalPayload);
+        requestId,
+        traceId,
+        ws,
+        messages,
+        startStep: 0,
+      });
     } catch (error: unknown) {
       const current = this.taskManager.getTask(taskId);
       if (current?.status === 'cancelled') {
@@ -393,6 +424,126 @@ export class AhaApp {
       };
       this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
     }
+  }
+
+  private async continueAgentLoop(params: {
+    taskId: string;
+    requestId: string;
+    traceId: string;
+    ws: WebSocket;
+    messages: ChatMessage[];
+    startStep: number;
+  }): Promise<void> {
+    if (!this.llmRouter) return;
+
+    for (let step = params.startStep; step < MAX_TOOL_STEPS; step++) {
+      const current = this.taskManager.getTask(params.taskId);
+      if (current?.status === 'cancelled') return;
+
+      const response = await this.llmRouter.chat(params.messages, params.traceId, {
+        tools: CODING_TOOLS as unknown as unknown[],
+        toolChoice: 'auto',
+      });
+
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        params.messages.push({
+          role: 'assistant',
+          content: response.content || '',
+          toolCalls: response.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: tc.arguments,
+            },
+          })),
+        });
+
+        for (const tc of response.toolCalls) {
+          const policyResult = this.evaluateToolPolicy(tc.name, tc.arguments, false);
+          if (policyResult.decision === 'deny') {
+            params.messages.push({
+              role: 'tool',
+              toolCallId: tc.id,
+              content: JSON.stringify({
+                ok: false,
+                error: policyResult.reason ?? 'Denied by policy',
+                errorCode: policyResult.errorCode,
+              }),
+            });
+            continue;
+          }
+
+          if (policyResult.decision === 'require_approval') {
+            const task = this.taskManager.getTask(params.taskId);
+            if (task && task.status === 'running') {
+              this.taskManager.transition(task.id, 'blocked');
+              this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_STATUS_CHANGE, {
+                taskId: task.id,
+                state: 'blocked',
+                desc: `Waiting for approval: ${tc.name}`,
+              } satisfies TaskStatusChangePayload);
+            }
+
+            const approval = this.approvalManager.createApproval({
+              taskId: params.taskId,
+              actionType: this.toApprovalActionType(tc.name),
+              target: this.describeToolTarget(tc.name, tc.arguments),
+              riskLevel: this.toRiskLevel(tc.name),
+              scope: {
+                workspace: this.config.workspacePath,
+                maxActions: 1,
+                timeoutSec: 300,
+              },
+            });
+
+            this.pendingApprovals.set(approval.approvalId, {
+              taskId: params.taskId,
+              requestId: params.requestId,
+              traceId: params.traceId,
+              ws: params.ws,
+              messages: params.messages,
+              step,
+              toolCall: tc,
+            });
+
+            const blockedPayload = this.approvalManager.toBlockedPayload(approval);
+            this.sendEnvelope(params.ws, params.requestId, ServerEvents.ACTION_BLOCKED, blockedPayload);
+            return;
+          }
+
+          const toolResult = await this.executeToolCall(tc.name, tc.arguments);
+          params.messages.push({
+            role: 'tool',
+            toolCallId: tc.id,
+            content: JSON.stringify(toolResult),
+          });
+        }
+        continue;
+      }
+
+      this.sendEnvelope(params.ws, params.requestId, ServerEvents.STREAM_CHUNK, {
+        taskId: params.taskId,
+        chunk: response.content || '(empty response)',
+        isFinal: true,
+      } satisfies StreamChunkPayload);
+
+      this.taskManager.transition(params.taskId, 'success');
+      this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
+        taskId: params.taskId,
+        state: 'success',
+        summary: 'Task completed',
+      } satisfies TaskTerminalPayload);
+      return;
+    }
+
+    this.taskManager.transition(params.taskId, 'failed');
+    this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
+      taskId: params.taskId,
+      state: 'failed',
+      summary: `Task aborted after exceeding ${MAX_TOOL_STEPS.toString()} tool iterations.`,
+      errorCode: 'AHA-LLM-002',
+    } satisfies TaskTerminalPayload);
   }
 
   private resolveWorkspacePath(inputPath: string): string {
@@ -463,15 +614,195 @@ export class AhaApp {
           return { ok: false, error: 'path escapes workspace boundary' };
         }
 
-        await fsp.mkdir(path.dirname(target), { recursive: true });
-        await fsp.writeFile(target, content, 'utf-8');
-        const version = await computeFileVersion(target);
-        return { ok: true, output: { path: target, version } };
+        return this.mutationQueue.enqueue(async () => {
+          await fsp.mkdir(path.dirname(target), { recursive: true });
+          await fsp.writeFile(target, content, 'utf-8');
+          const version = await computeFileVersion(target);
+          return { ok: true, output: { path: target, version } };
+        });
+      }
+
+      case 'diff_edit': {
+        const pathArg = typeof args.path === 'string' ? args.path : '';
+        const expectedVersion =
+          typeof args.expectedVersion === 'string' ? args.expectedVersion : undefined;
+        const hunks = Array.isArray(args.hunks)
+          ? args.hunks.filter(
+              (h): h is { oldText: string; newText: string } =>
+                typeof h === 'object' &&
+                h !== null &&
+                typeof (h as Record<string, unknown>).oldText === 'string' &&
+                typeof (h as Record<string, unknown>).newText === 'string',
+            )
+          : [];
+
+        if (!pathArg) return { ok: false, error: 'path is required' };
+        if (hunks.length === 0) return { ok: false, error: 'hunks is required' };
+
+        const target = this.resolveWorkspacePath(pathArg);
+        const allowed = await this.sandbox.validatePath(target);
+        if (!allowed) return { ok: false, error: 'path escapes workspace boundary' };
+
+        return this.mutationQueue.enqueue(async () => {
+          if (expectedVersion) {
+            const currentVersion = await computeFileVersion(target);
+            if (currentVersion !== expectedVersion) {
+              return {
+                ok: false,
+                errorCode: 'AHA-TOOL-002',
+                error: `Version conflict: expected ${expectedVersion}, got ${currentVersion}`,
+              };
+            }
+          }
+
+          let content = await fsp.readFile(target, 'utf-8');
+          for (const hunk of hunks) {
+            if (!content.includes(hunk.oldText)) {
+              return {
+                ok: false,
+                error: `oldText not found in file: ${hunk.oldText.slice(0, 60)}`,
+              };
+            }
+            content = content.replace(hunk.oldText, hunk.newText);
+          }
+
+          await fsp.writeFile(target, content, 'utf-8');
+          const version = await computeFileVersion(target);
+          return { ok: true, output: { path: target, version, appliedHunks: hunks.length } };
+        });
+      }
+
+      case 'delete_file': {
+        const pathArg = typeof args.path === 'string' ? args.path : '';
+        if (!pathArg) return { ok: false, error: 'path is required' };
+        const target = this.resolveWorkspacePath(pathArg);
+        const allowed = await this.sandbox.validatePath(target);
+        if (!allowed) return { ok: false, error: 'path escapes workspace boundary' };
+
+        return this.mutationQueue.enqueue(async () => {
+          await fsp.rm(target, { force: false });
+          return { ok: true, output: { path: target } };
+        });
+      }
+
+      case 'run_command': {
+        const command = typeof args.command === 'string' ? args.command : '';
+        const argv = Array.isArray(args.args)
+          ? args.args.filter((a): a is string => typeof a === 'string')
+          : [];
+        const cwdArg = typeof args.cwd === 'string' ? args.cwd : this.config.workspacePath;
+        const cwd = this.resolveWorkspacePath(cwdArg);
+        const timeoutSec = typeof args.timeoutSec === 'number' ? args.timeoutSec : undefined;
+
+        if (!command) return { ok: false, error: 'command is required' };
+        if (!(await this.sandbox.validatePath(cwd))) {
+          return { ok: false, error: 'cwd escapes workspace boundary' };
+        }
+
+        const result = await runCommand({
+          command,
+          args: argv,
+          cwd,
+          timeoutSec,
+        });
+        return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.errorMessage };
       }
 
       default:
         return { ok: false, error: `Unsupported tool: ${name}` };
     }
+  }
+
+  private toPolicyAction(toolName: string): PolicyAction {
+    switch (toolName) {
+      case 'list_dir':
+        return 'list_dir';
+      case 'read_file':
+        return 'read_file';
+      case 'create_dir':
+      case 'write_file':
+      case 'diff_edit':
+        return 'write_file';
+      case 'delete_file':
+        return 'delete_file';
+      case 'run_command':
+        return 'run_command';
+      default:
+        return 'read_file';
+    }
+  }
+
+  private toApprovalActionType(toolName: string): ApprovalActionType {
+    switch (toolName) {
+      case 'delete_file':
+        return 'delete_file';
+      case 'run_command':
+        return 'run_command';
+      default:
+        return 'write_file';
+    }
+  }
+
+  private toRiskLevel(toolName: string): RiskLevel {
+    switch (toolName) {
+      case 'run_command':
+        return 'high';
+      case 'delete_file':
+        return 'critical';
+      default:
+        return 'medium';
+    }
+  }
+
+  private describeToolTarget(toolName: string, rawArgs: string): string {
+    try {
+      const args = JSON.parse(rawArgs) as Record<string, unknown>;
+      if (typeof args.path === 'string') return args.path;
+      if (typeof args.command === 'string') return `${args.command} ${(args.args as string[] | undefined)?.join(' ') ?? ''}`.trim();
+    } catch {
+      // fall through
+    }
+    return toolName;
+  }
+
+  private evaluateToolPolicy(
+    toolName: string,
+    rawArgs: string,
+    approved: boolean,
+    approvalExpiresAt?: string,
+  ): ReturnType<typeof evaluate> {
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(rawArgs) as Record<string, unknown>;
+    } catch {
+      return { decision: 'deny', errorCode: 'AHA-TOOL-001', reason: 'Invalid tool arguments JSON' };
+    }
+
+    const resourcePath = typeof args.path === 'string' ? this.resolveWorkspacePath(args.path) : undefined;
+    const command = typeof args.command === 'string' ? args.command : undefined;
+
+    return evaluate({
+      actor: 'assistant',
+      action: this.toPolicyAction(toolName),
+      resource: {
+        path: resourcePath,
+        workspace: this.config.workspacePath,
+        command,
+      },
+      context: {
+        sessionValid: true,
+        originValid: true,
+        hasUserApproval: approved,
+        approvalScope:
+          approved && approvalExpiresAt
+            ? {
+                workspace: this.config.workspacePath,
+                maxActions: 1,
+                expiresAt: approvalExpiresAt,
+              }
+            : undefined,
+      },
+    });
   }
 
   private handleApproveAction(
@@ -499,8 +830,26 @@ export class AhaApp {
       return;
     }
 
+    const pending = this.pendingApprovals.get(payload.approvalId);
+    if (!pending) {
+      this.sendError(ws, envelope.requestId, 'AHA-TASK-001', 'Approval context not found');
+      return;
+    }
+
     // Consume the approval
     this.approvalManager.consumeApproval(payload.approvalId);
+    this.pendingApprovals.delete(payload.approvalId);
+
+    if (payload.decision === 'reject') {
+      this.taskManager.transition(payload.taskId, 'failed');
+      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+        taskId: payload.taskId,
+        state: 'failed',
+        summary: 'Action rejected by user',
+        errorCode: 'AHA-POLICY-002',
+      } satisfies TaskTerminalPayload);
+      return;
+    }
 
     // Resume the task (transition from blocked -> running)
     const task = this.taskManager.getTask(payload.taskId);
@@ -513,8 +862,56 @@ export class AhaApp {
         desc: 'Task resumed after approval',
       };
 
-      this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
+      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
     }
+
+    const policyAfterApproval = this.evaluateToolPolicy(
+      pending.toolCall.name,
+      pending.toolCall.arguments,
+      true,
+      result.approval.expiresAt,
+    );
+
+    if (policyAfterApproval.decision !== 'allow') {
+      this.taskManager.transition(payload.taskId, 'failed');
+      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+        taskId: payload.taskId,
+        state: 'failed',
+        summary: policyAfterApproval.reason ?? 'Approved action still denied by policy',
+        errorCode: policyAfterApproval.errorCode ?? 'AHA-POLICY-001',
+      } satisfies TaskTerminalPayload);
+      return;
+    }
+
+    void (async () => {
+      const toolResult = await this.executeToolCall(
+        pending.toolCall.name,
+        pending.toolCall.arguments,
+      );
+      pending.messages.push({
+        role: 'tool',
+        toolCallId: pending.toolCall.id,
+        content: JSON.stringify(toolResult),
+      });
+
+      await this.continueAgentLoop({
+        taskId: pending.taskId,
+        requestId: pending.requestId,
+        traceId: pending.traceId,
+        ws: pending.ws,
+        messages: pending.messages,
+        startStep: pending.step + 1,
+      });
+    })().catch((err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      this.taskManager.transition(payload.taskId, 'failed');
+      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+        taskId: payload.taskId,
+        state: 'failed',
+        summary: `Resume failed: ${errMsg}`,
+        errorCode: 'AHA-SYS-001',
+      } satisfies TaskTerminalPayload);
+    });
   }
 
   private handleCancelTask(
@@ -523,6 +920,12 @@ export class AhaApp {
     traceId: string,
   ): void {
     const { payload } = envelope;
+
+    for (const [approvalId, pending] of this.pendingApprovals.entries()) {
+      if (pending.taskId === payload.taskId) {
+        this.pendingApprovals.delete(approvalId);
+      }
+    }
 
     // Cancel the task
     const result = this.taskManager.cancel(payload.taskId);

@@ -17,6 +17,7 @@ export interface Message {
 }
 
 export interface PendingApproval {
+  taskId: string;
   approvalId: string;
   approvalNonce: string;
   actionType: string;
@@ -100,6 +101,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
           const p = payload as ActionBlockedPayload;
           set({
             pendingApproval: {
+              taskId: p.taskId,
               approvalId: p.approvalId,
               approvalNonce: p.approvalNonce,
               actionType: p.actionType,
@@ -169,7 +171,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       idempotencyKey: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       type: 'approve_action',
-      payload: { taskId: '', approvalId, approvalNonce: nonce, decision },
+      payload: { taskId: get().pendingApproval?.taskId ?? '', approvalId, approvalNonce: nonce, decision },
     });
     set((state) => ({
       rawMessages: [
