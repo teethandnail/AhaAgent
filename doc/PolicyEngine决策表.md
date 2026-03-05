@@ -15,6 +15,10 @@ type Action =
   | 'read_file'
   | 'list_dir'
   | 'grep'
+  | 'web_search'
+  | 'fetch_url'
+  | 'browser_open'
+  | 'extract_main_content'
   | 'diff_edit'
   | 'write_file'
   | 'delete_file'
@@ -79,6 +83,8 @@ interface PolicyInput {
 - `install_extension`
 - `invoke_extension_tool`（当扩展声明高风险权限时）
 
+说明：`browser_tool` 为编排层工具名，在策略层映射为只读动作 `browser_open`，默认不需要审批。
+
 审批必须满足：
 
 - `approvalScope.workspace` 覆盖当前资源。
@@ -91,6 +97,7 @@ interface PolicyInput {
 | --------- | -------------------------------------------- | ------------------------------------------ | ---------------------- |
 | user      | read_file/list_dir/grep                      | 路径在工作区且不命中硬拒绝                 | allow                  |
 | assistant | read_file/list_dir/grep                      | 同上                                       | allow                  |
+| assistant | web_search/fetch_url/browser_open/extract_main_content | URL 通过安全校验且不命中硬拒绝     | allow                  |
 | assistant | send_to_llm                                  | 输入非 `secret`; `restricted` 已脱敏       | allow                  |
 | assistant | diff_edit/write_file/delete_file/run_command | 有效审批存在且在 scope 内                  | allow                  |
 | user      | install_extension                            | 来源可信 + 校验通过 + 用户确认权限         | allow                  |

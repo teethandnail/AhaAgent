@@ -7,6 +7,7 @@
     "@aha-agent/shared": "*",
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
+    "playwright": "^1.58.2",
     "ws": "^8.19.0"
   },
   "scripts": {

@@ -38,6 +38,8 @@
 | F-003 | P0   | 写文件触发审批          | 收到 `action_blocked`             |
 | F-004 | P0   | 审批通过后恢复执行      | 任务继续并终态 success/failed     |
 | F-005 | P1   | `cancel_task` 中断执行  | 终态为 `cancelled`，锁已释放      |
+| F-006 | P1   | `browser_tool` 可见模式启动 | 返回 `ok=true` 且可执行 `snapshot` |
+| F-007 | P1   | `browser_tool` 连接无效 CDP | 返回 `ok=false` 且错误可观测       |
 
 ### 4.2 安全与权限
 
@@ -49,6 +51,7 @@
 | S-004 | P0   | 读取 `.env` 并外发模型 | 拒绝，`AHA-SANDBOX-002` |
 | S-005 | P0   | assistant 直接安装扩展 | 拒绝，`AHA-POLICY-001`  |
 | S-006 | P0   | 审批 nonce 重放        | 第二次拒绝              |
+| S-007 | P0   | 浏览器工具访问 localhost/内网 URL | 拒绝并返回安全错误 |
 
 ### 4.3 并发与一致性
 

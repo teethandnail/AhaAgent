@@ -1,5 +1,20 @@
 # AhaAgent 使用说明书
 
+## 文档索引
+
+### 规范层（长期维护）
+
+- `README.md`：运行、配置、排障、使用说明（Owner: Maintainer）
+- `doc/产品需求与范围.md`：产品目标、范围、非目标、阶段计划（Owner: PM/Tech Lead）
+- `doc/技术设计文档.md`：系统架构、模块职责、关键流程（Owner: Tech Lead）
+- `doc/协议契约与错误码规范.md`：协议字段、工具契约、错误码（Owner: Server + Client）
+- `doc/PolicyEngine决策表.md`：策略规则、审批矩阵（Owner: Server/Security）
+- `doc/验收测试与CI门禁.md`：测试矩阵、CI 通过标准（Owner: QA/Infra）
+
+### 归档层（历史方案）
+
+- `docs/plans/`：阶段性计划与执行稿，仅供历史追溯，不作为当前规范来源。
+
 ## 目录
 
 1. [环境要求](#1-环境要求)
@@ -430,6 +445,37 @@ npm run format:check   # Prettier 检查
 npm run typecheck      # TypeScript 类型检查
 ```
 
+### 浏览器自动化（可选）
+
+如果你希望 Agent 直接操作真实浏览器（`browser_tool`），需要额外安装 Playwright：
+
+```bash
+npm i -w packages/server playwright
+npx playwright install chromium
+```
+
+可选环境变量：
+
+```bash
+# 默认 0（可见窗口）；设置为 1 使用无头模式
+export AHA_BROWSER_HEADLESS=0
+
+# 可选：指定浏览器通道（例如 chrome、msedge）
+export AHA_BROWSER_CHANNEL=chrome
+```
+
+如果你希望 Agent 直接使用你平常登录态的浏览器（不重复登录），可使用 CDP 连接模式：
+
+```bash
+# 1) 先手动启动你自己的 Chrome（带远程调试端口）
+# macOS 示例：
+open -na "Google Chrome" --args --remote-debugging-port=9222
+
+# 2) 启动 AhaAgent 时指向该端口
+export AHA_BROWSER_CDP_URL=http://127.0.0.1:9222
+node packages/server/dist/cli.js
+```
+
 ## 9. 常见问题
 
 ### Q: 启动时报 "No LLM config found"
@@ -471,6 +517,23 @@ npx vitest run --reporter=verbose
 npx vitest run packages/server/src/policy/policy-engine.test.ts
 ```
 
+### Q: 为什么提示 `playwright is not installed`？
+
+你触发了 `browser_tool`，但服务端还没安装浏览器驱动依赖。执行：
+
+```bash
+npm i -w packages/server playwright
+npx playwright install chromium
+```
+
+### Q: 我想让 Agent 直接使用我平常登录过的网站会话，怎么做？
+
+推荐使用 `AHA_BROWSER_CDP_URL`：
+
+1. 用 `--remote-debugging-port=9222` 启动你当前日常 Chrome。
+2. 启动 AhaAgent 前设置 `AHA_BROWSER_CDP_URL=http://127.0.0.1:9222`。
+3. Agent 会优先连接这个已运行的浏览器实例，而不是新开隔离上下文。
+
 ### Q: Agent 只能读取工作区内的文件吗？
 
 是的。这是安全设计的一部分。Agent 只能访问启动时指定的工作区目录内的文件。尝试访问工作区外的路径会被文件沙箱拦截，返回 `AHA-SANDBOX-001` 错误。
@@ -486,12 +549,12 @@ npx vitest run packages/server/src/policy/policy-engine.test.ts
 
 ### Q: 当前版本的限制
 
-这是 V1 版本，以下功能已搭建骨架但尚未完整串联：
+这是 V1 版本，当前已支持基础 Agent 自动循环（含工具调用与审批恢复），但仍有以下已知边界：
 
-1. **复杂 Agent 循环**：当前已支持基础对话回路（发消息→LLM 回复→任务结束），但“工具调用→审批→继续”的完整 Agent 闭环尚需进一步串联
-2. **断点恢复**：CheckpointManager 已实现，但 Daemon 重启后的自动恢复流程未完成
-3. **扩展系统**：安装校验和隔离运行器已实现，但实际的 MCP 协议通信层未完成
-4. **生产化配置**：当前前端仍以 `VITE_WS_PORT` 为主配置入口，生产环境建议进一步完善成统一配置下发机制
+1. **断点恢复**：CheckpointManager 已实现，Daemon 重启后的自动恢复流程仍在完善
+2. **扩展系统**：安装校验和隔离运行器已实现，MCP 协议通信仍需补全
+3. **浏览器自动化**：`browser_tool` 已可用，但复杂站点（反爬、强登录流程、验证码）成功率受站点策略影响
+4. **生产化配置**：前端仍以 `VITE_WS_PORT` 为主配置入口，生产环境建议统一配置下发机制
 
 ---
 

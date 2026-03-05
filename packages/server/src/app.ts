@@ -37,6 +37,7 @@ import { listDir } from './tools/list-dir.js';
 import { computeFileVersion } from './tools/file-version.js';
 import { runCommand } from './tools/run-command.js';
 import { extractMainContent, fetchUrlWithSafety, searchWebDuckDuckGo } from './tools/web-search.js';
+import { BrowserAutomationService } from './tools/browser-automation.js';
 import { evaluate } from './policy/policy-engine.js';
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
@@ -117,6 +118,35 @@ const CODING_TOOLS = [
           content: { type: 'string', description: 'File content.' },
         },
         required: ['path', 'content'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_tool',
+      description:
+        'Control a real browser session. Supports: status/start/stop/search/open/click_result/click/type/snapshot.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['status', 'start', 'stop', 'search', 'open', 'click_result', 'click', 'type', 'snapshot'],
+          },
+          query: { type: 'string' },
+          engine: { type: 'string', enum: ['duckduckgo', 'google', 'bing'] },
+          maxResults: { type: 'number' },
+          url: { type: 'string' },
+          index: { type: 'number' },
+          selector: { type: 'string' },
+          text: { type: 'string' },
+          submit: { type: 'boolean' },
+          timeoutSec: { type: 'number' },
+          maxChars: { type: 'number' },
+        },
+        required: ['action'],
         additionalProperties: false,
       },
     },
@@ -274,6 +304,7 @@ export class AhaApp {
   private llmRouter: LLMRouter | null = null;
   private extensionInstaller: ExtensionInstaller;
   private extensionRunner: ExtensionRunner;
+  private browserAutomation: BrowserAutomationService;
   private pendingApprovals = new Map<string, PendingApprovalContext>();
 
   private db: AppDatabase | null = null;
@@ -294,6 +325,7 @@ export class AhaApp {
       allowedSources: [],
     });
     this.extensionRunner = new ExtensionRunner();
+    this.browserAutomation = new BrowserAutomationService();
 
     if (config.llmConfig) {
       this.llmRouter = new LLMRouter({
@@ -352,6 +384,7 @@ export class AhaApp {
 
     // 1. Stop all extensions
     await this.extensionRunner.stopAll();
+    await this.browserAutomation.stop().catch(() => undefined);
 
     // 2. Close gateway
     if (this.gateway) {
@@ -464,7 +497,8 @@ export class AhaApp {
           role: 'system',
           content:
             'You are a coding agent operating inside a local workspace. Use tools when filesystem changes or web research are requested. ' +
-            'For web questions, prefer browser_search then fetch_url on top results, and cite source URLs in your final response.',
+            'For web tasks, prefer browser_tool(action=search/open/click_result/snapshot) for interactive browsing. ' +
+            'For fast reading, use browser_search + fetch_url and cite source URLs in your final response.',
         },
         { role: 'user', content: userText },
       ];
@@ -542,10 +576,20 @@ export class AhaApp {
         });
 
         for (const tc of response.toolCalls) {
+          let parsedArgs: Record<string, unknown> | undefined;
+          try {
+            parsedArgs = JSON.parse(tc.arguments) as Record<string, unknown>;
+          } catch {
+            parsedArgs = undefined;
+          }
           this.logProgress('tool_call', {
             taskId: params.taskId,
             step,
             tool: tc.name,
+            action:
+              tc.name === 'browser_tool' && parsedArgs && typeof parsedArgs.action === 'string'
+                ? parsedArgs.action
+                : undefined,
           });
           const policyResult = this.evaluateToolPolicy(tc.name, tc.arguments, false);
           if (policyResult.decision === 'deny') {
@@ -609,6 +653,13 @@ export class AhaApp {
             traceId: params.traceId,
             taskId: params.taskId,
             requestId: params.requestId,
+          });
+          this.logProgress('tool_result', {
+            taskId: params.taskId,
+            step,
+            tool: tc.name,
+            ok: toolResult.ok === true,
+            error: typeof toolResult.error === 'string' ? toolResult.error : undefined,
           });
           params.messages.push({
             role: 'tool',
@@ -686,6 +737,69 @@ export class AhaApp {
     }
 
     switch (name) {
+      case 'browser_tool': {
+        const action = typeof args.action === 'string' ? args.action : '';
+        const timeoutMs =
+          typeof args.timeoutSec === 'number' && Number.isFinite(args.timeoutSec)
+            ? Math.max(1, Math.min(60, args.timeoutSec)) * 1000
+            : undefined;
+
+        try {
+          switch (action) {
+            case 'status':
+              return await this.browserAutomation.status();
+            case 'start':
+              return await this.browserAutomation.start();
+            case 'stop':
+              return await this.browserAutomation.stop();
+            case 'search': {
+              const query = typeof args.query === 'string' ? args.query : '';
+              if (!query.trim()) return { ok: false, error: 'query is required for action=search' };
+              return await this.browserAutomation.search({
+                query,
+                engine: args.engine,
+                maxResults: args.maxResults as number | undefined,
+                timeoutMs,
+              });
+            }
+            case 'open': {
+              const url = typeof args.url === 'string' ? args.url : '';
+              if (!url.trim()) return { ok: false, error: 'url is required for action=open' };
+              return await this.browserAutomation.open({ url, timeoutMs });
+            }
+            case 'click_result': {
+              const index = typeof args.index === 'number' ? args.index : Number.NaN;
+              if (!Number.isFinite(index)) return { ok: false, error: 'index is required for action=click_result' };
+              return await this.browserAutomation.clickResult({ index, timeoutMs });
+            }
+            case 'click': {
+              const selector = typeof args.selector === 'string' ? args.selector : '';
+              if (!selector.trim()) return { ok: false, error: 'selector is required for action=click' };
+              return await this.browserAutomation.click({ selector, timeoutMs });
+            }
+            case 'type': {
+              const selector = typeof args.selector === 'string' ? args.selector : '';
+              const text = typeof args.text === 'string' ? args.text : '';
+              const submit = typeof args.submit === 'boolean' ? args.submit : false;
+              if (!selector.trim()) return { ok: false, error: 'selector is required for action=type' };
+              return await this.browserAutomation.type({ selector, text, submit, timeoutMs });
+            }
+            case 'snapshot': {
+              const maxChars =
+                typeof args.maxChars === 'number' && Number.isFinite(args.maxChars)
+                  ? Math.max(500, Math.min(50_000, Math.floor(args.maxChars)))
+                  : undefined;
+              return await this.browserAutomation.snapshot({ maxChars });
+            }
+            default:
+              return { ok: false, error: `Unsupported browser_tool action: ${action || '(empty)'}` };
+          }
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : 'browser_tool failed';
+          return { ok: false, error: msg };
+        }
+      }
+
       case 'browser_search': {
         const query = typeof args.query === 'string' ? args.query : '';
         const maxResults =
@@ -910,6 +1024,8 @@ export class AhaApp {
 
   private toPolicyAction(toolName: string): PolicyAction {
     switch (toolName) {
+      case 'browser_tool':
+        return 'browser_open';
       case 'list_dir':
         return 'list_dir';
       case 'read_file':
