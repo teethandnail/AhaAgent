@@ -199,7 +199,6 @@ const CODING_TOOLS = [
         properties: {
           url: { type: 'string' },
           timeoutSec: { type: 'number' },
-          maxBytes: { type: 'number' },
         },
         required: ['url'],
         additionalProperties: false,
@@ -216,7 +215,6 @@ const CODING_TOOLS = [
         properties: {
           url: { type: 'string' },
           timeoutSec: { type: 'number' },
-          maxBytes: { type: 'number' },
         },
         required: ['url'],
         additionalProperties: false,
@@ -1051,10 +1049,7 @@ export class AhaApp {
           typeof args.timeoutSec === 'number' && Number.isFinite(args.timeoutSec)
             ? Math.max(1, Math.min(30, args.timeoutSec))
             : 12;
-        const maxBytes =
-          typeof args.maxBytes === 'number' && Number.isFinite(args.maxBytes)
-            ? Math.max(16 * 1024, Math.min(1_000_000, Math.floor(args.maxBytes)))
-            : 512 * 1024;
+        const maxBytes = 512 * 1024;
         if (!url) return { ok: false, error: 'url is required' };
         try {
           const fetched = await fetchUrlWithSafety({

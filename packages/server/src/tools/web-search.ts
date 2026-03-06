@@ -93,12 +93,17 @@ async function readBodyWithLimit(res: Response, maxBytes: number): Promise<strin
     if (!value) continue;
     total += value.byteLength;
     if (total > maxBytes) {
-      throw new Error(`Response too large: ${total.toString()} bytes`);
+      const excess = total - maxBytes;
+      chunks.push(value.slice(0, value.byteLength - excess));
+      reader.cancel().catch(() => {});
+      break;
     }
     chunks.push(value);
   }
 
-  const merged = new Uint8Array(total);
+  let finalSize = 0;
+  for (const chunk of chunks) finalSize += chunk.byteLength;
+  const merged = new Uint8Array(finalSize);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
