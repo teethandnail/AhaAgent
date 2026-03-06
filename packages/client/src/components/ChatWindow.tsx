@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useWebSocketStore } from '@/stores/websocket';
 import { cn } from '@/lib/utils';
 
@@ -69,17 +71,21 @@ export function ChatWindow() {
           >
             <div
               className={cn(
-                'max-w-[75%] rounded-lg px-4 py-2 text-sm whitespace-pre-wrap',
+                'max-w-[75%] rounded-lg px-4 py-2 text-sm',
                 msg.role === 'user'
-                  ? 'text-white'
-                  : '',
+                  ? 'text-white whitespace-pre-wrap'
+                  : 'prose prose-sm dark:prose-invert max-w-none',
               )}
               style={{
                 backgroundColor: msg.role === 'user' ? 'var(--primary)' : 'var(--muted)',
                 color: msg.role === 'user' ? 'var(--primary-foreground)' : 'var(--foreground)',
               }}
             >
-              {msg.content}
+              {msg.role === 'user' ? (
+                msg.content
+              ) : (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              )}
             </div>
           </div>
         ))}
