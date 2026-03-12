@@ -1,8 +1,21 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3';
+import type { ApprovalRequest } from '@aha-agent/shared';
 import { eq, desc, notInArray } from 'drizzle-orm';
 import type { Checkpoint, TaskNode } from '@aha-agent/shared';
 import type { AppDatabase } from '../db/client.js';
-import { tasks, checkpoints } from '../db/schema.js';
+import { tasks, checkpoints, approvalRecoveries } from '../db/schema.js';
+
+export interface ApprovalRecoveryRecord {
+  approval: ApprovalRequest;
+  taskId: string;
+  requestId: string;
+  traceId: string;
+  messagesJson: string;
+  step: number;
+  toolCallJson: string;
+  executionJson: string;
+  createdAt: string;
+}
 
 const CREATE_TABLES_SQL = `
   CREATE TABLE IF NOT EXISTS tasks (
@@ -35,6 +48,19 @@ const CREATE_TABLES_SQL = `
     result TEXT NOT NULL,
     details TEXT,
     timestamp TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS approval_recoveries (
+    approval_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    request_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    approval_json TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    step INTEGER NOT NULL,
+    tool_call_json TEXT NOT NULL,
+    execution_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
   );
 `;
 
@@ -198,6 +224,67 @@ export class CheckpointManager {
         updatedAt: now,
       })
       .where(eq(tasks.id, taskId))
+      .run();
+  }
+
+  saveApprovalRecovery(record: ApprovalRecoveryRecord): void {
+    this.db
+      .insert(approvalRecoveries)
+      .values({
+        approvalId: record.approval.approvalId,
+        taskId: record.taskId,
+        requestId: record.requestId,
+        traceId: record.traceId,
+        approvalJson: JSON.stringify(record.approval),
+        messagesJson: record.messagesJson,
+        step: record.step,
+        toolCallJson: record.toolCallJson,
+        executionJson: record.executionJson,
+        createdAt: record.createdAt,
+      })
+      .onConflictDoUpdate({
+        target: approvalRecoveries.approvalId,
+        set: {
+          taskId: record.taskId,
+          requestId: record.requestId,
+          traceId: record.traceId,
+          approvalJson: JSON.stringify(record.approval),
+          messagesJson: record.messagesJson,
+          step: record.step,
+          toolCallJson: record.toolCallJson,
+          executionJson: record.executionJson,
+          createdAt: record.createdAt,
+        },
+      })
+      .run();
+  }
+
+  loadApprovalRecoveries(): ApprovalRecoveryRecord[] {
+    const rows = this.db.select().from(approvalRecoveries).all();
+    return rows.map((row) => ({
+      approval: JSON.parse(row.approvalJson) as ApprovalRequest,
+      taskId: row.taskId,
+      requestId: row.requestId,
+      traceId: row.traceId,
+      messagesJson: row.messagesJson,
+      step: row.step,
+      toolCallJson: row.toolCallJson,
+      executionJson: row.executionJson,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  deleteApprovalRecovery(approvalId: string): void {
+    this.db
+      .delete(approvalRecoveries)
+      .where(eq(approvalRecoveries.approvalId, approvalId))
+      .run();
+  }
+
+  deleteApprovalRecoveriesForTask(taskId: string): void {
+    this.db
+      .delete(approvalRecoveries)
+      .where(eq(approvalRecoveries.taskId, taskId))
       .run();
   }
 }

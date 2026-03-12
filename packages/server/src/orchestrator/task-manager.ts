@@ -61,6 +61,13 @@ export class TaskManager {
   }
 
   /**
+   * Restore a persisted task into the in-memory state machine.
+   */
+  restoreTask(task: TaskNode): void {
+    this.tasks.set(task.id, { ...task });
+  }
+
+  /**
    * Retrieve a task by ID.
    */
   getTask(taskId: string): TaskNode | undefined {
@@ -78,6 +85,13 @@ export class TaskManager {
       }
     }
     return result;
+  }
+
+  /**
+   * Return all tasks currently tracked in memory.
+   */
+  listTasks(): TaskNode[] {
+    return [...this.tasks.values()];
   }
 
   /**

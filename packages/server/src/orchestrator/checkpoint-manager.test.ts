@@ -43,6 +43,7 @@ describe('CheckpointManager', () => {
     expect(tableNames).toContain('tasks');
     expect(tableNames).toContain('checkpoints');
     expect(tableNames).toContain('audit_logs');
+    expect(tableNames).toContain('approval_recoveries');
   });
 
   // --- saveTask / loadTask ---
@@ -265,5 +266,71 @@ describe('CheckpointManager', () => {
     expect(loaded!.status).toBe('failed');
     expect(loaded!.errorCode).toBe('AHA-SYS-001');
     expect(loaded!.errorMessage).toBe('Interrupted during restart');
+  });
+
+  it('saveApprovalRecovery and loadApprovalRecoveries roundtrip', () => {
+    manager.saveTask({ id: 'task-7', title: 'T7', status: 'blocked' });
+
+    manager.saveApprovalRecovery({
+      approval: {
+        approvalId: 'approval-7',
+        taskId: 'task-7',
+        actionType: 'write_file',
+        target: 'src/app.ts',
+        riskLevel: 'medium',
+        nonce: 'nonce-7',
+        expiresAt: '2026-03-13T00:05:00.000Z',
+        scope: {
+          workspace: '/workspace',
+          maxActions: 1,
+          timeoutSec: 300,
+        },
+      },
+      taskId: 'task-7',
+      requestId: 'request-7',
+      traceId: 'trace-7',
+      messagesJson: '[{"role":"user","content":"hello"}]',
+      step: 3,
+      toolCallJson: '{"id":"tool-7","name":"write_file","arguments":"{}"}',
+      executionJson: '{"mode":"interactive","budget":{"maxSteps":8},"usage":{"steps":3,"writes":0,"commands":0}}',
+      createdAt: '2026-03-13T00:00:00.000Z',
+    });
+
+    const recoveries = manager.loadApprovalRecoveries();
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]!.approval.approvalId).toBe('approval-7');
+    expect(recoveries[0]!.requestId).toBe('request-7');
+    expect(recoveries[0]!.step).toBe(3);
+  });
+
+  it('deleteApprovalRecovery removes a persisted approval context', () => {
+    manager.saveTask({ id: 'task-8', title: 'T8', status: 'blocked' });
+    manager.saveApprovalRecovery({
+      approval: {
+        approvalId: 'approval-8',
+        taskId: 'task-8',
+        actionType: 'run_command',
+        target: 'npm test',
+        riskLevel: 'high',
+        nonce: 'nonce-8',
+        expiresAt: '2026-03-13T00:03:00.000Z',
+        scope: {
+          workspace: '/workspace',
+          maxActions: 1,
+          timeoutSec: 180,
+        },
+      },
+      taskId: 'task-8',
+      requestId: 'request-8',
+      traceId: 'trace-8',
+      messagesJson: '[]',
+      step: 1,
+      toolCallJson: '{"id":"tool-8","name":"run_command","arguments":"{}"}',
+      executionJson: '{"mode":"interactive","budget":{"maxSteps":8},"usage":{"steps":1,"writes":0,"commands":0}}',
+      createdAt: '2026-03-13T00:00:00.000Z',
+    });
+
+    manager.deleteApprovalRecovery('approval-8');
+    expect(manager.loadApprovalRecoveries()).toEqual([]);
   });
 });

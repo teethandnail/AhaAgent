@@ -34,6 +34,21 @@ export const auditLogs = sqliteTable('audit_logs', {
   timestamp: text('timestamp').notNull(),
 });
 
+export const approvalRecoveries = sqliteTable('approval_recoveries', {
+  approvalId: text('approval_id').primaryKey(),
+  taskId: text('task_id')
+    .notNull()
+    .references(() => tasks.id),
+  requestId: text('request_id').notNull(),
+  traceId: text('trace_id').notNull(),
+  approvalJson: text('approval_json').notNull(),
+  messagesJson: text('messages_json').notNull(),
+  step: integer('step').notNull(),
+  toolCallJson: text('tool_call_json').notNull(),
+  executionJson: text('execution_json').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
 export const memories = sqliteTable('memories', {
   id: text('id').primaryKey(),
   content: text('content').notNull(),

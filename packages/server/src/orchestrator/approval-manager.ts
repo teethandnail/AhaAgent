@@ -72,6 +72,16 @@ export class ApprovalManager {
   }
 
   /**
+   * Restore a previously persisted approval back into the active pending map.
+   */
+  restoreApproval(approval: ApprovalRequest): void {
+    this.pending.set(approval.approvalId, {
+      approval,
+      consumed: false,
+    });
+  }
+
+  /**
    * Validate an approval by id and nonce.
    *
    * Checks existence, nonce match (timing-safe), expiry, consumption state,

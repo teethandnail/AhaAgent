@@ -64,6 +64,28 @@ describe('TaskManager', () => {
     expect(children).toContain(c2);
   });
 
+  it('restores a persisted task into memory', () => {
+    const mgr = new TaskManager();
+    mgr.restoreTask({
+      id: 'restored-task',
+      title: 'Recovered approval',
+      status: 'blocked',
+    });
+
+    const task = mgr.getTask('restored-task');
+    expect(task).toBeDefined();
+    expect(task?.status).toBe('blocked');
+  });
+
+  it('lists all tracked tasks', () => {
+    const mgr = new TaskManager();
+    const a = mgr.createTask('A');
+    const b = mgr.createTask('B');
+
+    const ids = mgr.listTasks().map((task) => task.id).sort();
+    expect(ids).toEqual([a.id, b.id].sort());
+  });
+
   // ---- valid transitions ----
 
   it('should transition pending -> running', () => {

@@ -57,6 +57,30 @@ describe('ApprovalManager', () => {
     });
   });
 
+  describe('restoreApproval', () => {
+    it('restores a persisted approval so it can be validated again', () => {
+      const approval = {
+        approvalId: 'approval-restore',
+        taskId: 'task-restore',
+        actionType: 'write_file' as const,
+        target: '/src/index.ts',
+        riskLevel: 'medium' as const,
+        nonce: 'a'.repeat(64),
+        expiresAt: '2099-01-01T00:05:00.000Z',
+        scope: {
+          workspace: '/project',
+          maxActions: 1,
+          timeoutSec: 300,
+        },
+      };
+
+      manager.restoreApproval(approval);
+      const result = manager.validateApproval(approval.approvalId, approval.nonce);
+
+      expect(result.valid).toBe(true);
+    });
+  });
+
   // ── validateApproval ──────────────────────────────────────
 
   describe('validateApproval', () => {

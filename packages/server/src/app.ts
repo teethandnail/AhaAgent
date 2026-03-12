@@ -23,7 +23,10 @@ import {
 import { createGateway, type Gateway } from './gateway/ws-server.js';
 import { TaskManager } from './orchestrator/task-manager.js';
 import { ApprovalManager } from './orchestrator/approval-manager.js';
-import { CheckpointManager } from './orchestrator/checkpoint-manager.js';
+import {
+  CheckpointManager,
+  type ApprovalRecoveryRecord,
+} from './orchestrator/checkpoint-manager.js';
 import { MemoryController } from './memory/memory-controller.js';
 import { ContextManager } from './memory/context-manager.js';
 import { MutationQueue } from './orchestrator/mutation-queue.js';
@@ -59,7 +62,7 @@ interface PendingApprovalContext {
   taskId: string;
   requestId: string;
   traceId: string;
-  ws: WebSocket;
+  ws?: WebSocket;
   messages: ChatMessage[];
   step: number;
   toolCall: ToolCallRequest;
@@ -388,7 +391,14 @@ export class AhaApp {
     this.config = config;
 
     // Eagerly create services that don't need the database
-    this.taskManager = new TaskManager();
+    this.taskManager = new TaskManager({
+      onStateChange: (taskId) => {
+        const task = this.taskManager.getTask(taskId);
+        if (task) {
+          this.checkpointManager?.saveTask(task);
+        }
+      },
+    });
     this.approvalManager = new ApprovalManager();
     this.mutationQueue = new MutationQueue();
     this.fileLock = new FileLock();
@@ -440,6 +450,9 @@ export class AhaApp {
     this.gateway = createGateway({
       port: this.config.port,
       originPort: this.config.originPort,
+      onConnect: (ws) => {
+        this.handleClientConnect(ws);
+      },
       onMessage: (ws, envelope) => {
         this.handleMessage(envelope, ws);
       },
@@ -534,9 +547,6 @@ export class AhaApp {
 
     // Transition to running
     this.taskManager.transition(task.id, 'running');
-
-    // Persist task if checkpoint manager is available
-    this.checkpointManager?.saveTask(task);
 
     // Send task_status_change back
     const statusPayload: TaskStatusChangePayload = {
@@ -825,6 +835,14 @@ export class AhaApp {
                 timeoutSec: 300,
               },
             });
+            this.checkpointManager?.saveCheckpoint({
+              checkpointId: crypto.randomUUID(),
+              taskId: params.taskId,
+              stepId: `approval-step-${String(step)}`,
+              llmContextRef: `messages:${String(params.messages.length)}`,
+              pendingApprovalId: approval.approvalId,
+              createdAt: new Date().toISOString(),
+            });
 
             this.pendingApprovals.set(approval.approvalId, {
               taskId: params.taskId,
@@ -836,6 +854,7 @@ export class AhaApp {
               toolCall: tc,
               execution: params.execution,
             });
+            this.persistApprovalRecovery(approval.approvalId);
 
             const blockedPayload = this.approvalManager.toBlockedPayload(approval);
             this.sendEnvelope(params.ws, params.requestId, ServerEvents.ACTION_BLOCKED, blockedPayload);
@@ -889,6 +908,7 @@ export class AhaApp {
       } satisfies StreamChunkPayload);
 
       this.taskManager.transition(params.taskId, 'success');
+      this.clearTaskRecoveryState(params.taskId);
       this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
         taskId: params.taskId,
         state: 'success',
@@ -899,6 +919,7 @@ export class AhaApp {
     }
 
     this.taskManager.transition(params.taskId, 'failed');
+    this.clearTaskRecoveryState(params.taskId);
     this.sendEnvelope(params.ws, params.requestId, ServerEvents.TASK_TERMINAL, {
       taskId: params.taskId,
       state: 'failed',
@@ -1496,13 +1517,17 @@ export class AhaApp {
       return;
     }
 
+    pending.ws = ws;
+
     // Consume the approval
     this.approvalManager.consumeApproval(payload.approvalId);
     this.pendingApprovals.delete(payload.approvalId);
+    this.checkpointManager?.deleteApprovalRecovery(payload.approvalId);
 
     if (payload.decision === 'reject') {
       this.taskManager.transition(payload.taskId, 'failed');
-      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+      this.clearTaskRecoveryState(payload.taskId);
+      this.sendEnvelope(ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
         taskId: payload.taskId,
         state: 'failed',
         summary: 'Action rejected by user',
@@ -1528,7 +1553,7 @@ export class AhaApp {
         budget: this.toBudgetPayload(pending.execution),
       };
 
-      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
+      this.sendEnvelope(ws, pending.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
     }
 
     const policyAfterApproval = this.evaluateToolPolicy(
@@ -1540,7 +1565,8 @@ export class AhaApp {
 
     if (policyAfterApproval.decision !== 'allow') {
       this.taskManager.transition(payload.taskId, 'failed');
-      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+      this.clearTaskRecoveryState(payload.taskId);
+      this.sendEnvelope(ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
         taskId: payload.taskId,
         state: 'failed',
         summary: policyAfterApproval.reason ?? 'Approved action still denied by policy',
@@ -1569,7 +1595,7 @@ export class AhaApp {
         taskId: pending.taskId,
         requestId: pending.requestId,
         traceId: pending.traceId,
-        ws: pending.ws,
+        ws,
         messages: pending.messages,
         startStep: pending.step + 1,
         execution: pending.execution,
@@ -1577,7 +1603,8 @@ export class AhaApp {
     })().catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';
       this.taskManager.transition(payload.taskId, 'failed');
-      this.sendEnvelope(pending.ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
+      this.clearTaskRecoveryState(payload.taskId);
+      this.sendEnvelope(ws, pending.requestId, ServerEvents.TASK_TERMINAL, {
         taskId: payload.taskId,
         state: 'failed',
         summary: `Resume failed: ${errMsg}`,
@@ -1596,6 +1623,7 @@ export class AhaApp {
     for (const [approvalId, pending] of this.pendingApprovals.entries()) {
       if (pending.taskId === payload.taskId) {
         this.pendingApprovals.delete(approvalId);
+        this.checkpointManager?.deleteApprovalRecovery(approvalId);
       }
     }
 
@@ -1625,6 +1653,7 @@ export class AhaApp {
       summary: payload.reason ?? 'Task cancelled by user',
     };
 
+    this.clearTaskRecoveryState(payload.taskId);
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
     this.logProgress('task_cancelled', {
       taskId: payload.taskId,
@@ -1662,13 +1691,114 @@ export class AhaApp {
     this.sendEnvelope(ws, requestId, ServerEvents.ERROR, payload);
   }
 
+  private handleClientConnect(ws: WebSocket): void {
+    for (const task of this.taskManager.listTasks()) {
+      if (task.status === 'success' || task.status === 'failed' || task.status === 'cancelled') {
+        continue;
+      }
+
+      this.sendEnvelope(ws, crypto.randomUUID(), ServerEvents.TASK_STATUS_CHANGE, {
+        taskId: task.id,
+        state: task.status,
+        desc:
+          task.status === 'blocked'
+            ? 'Recovered pending approval'
+            : `Recovered active task: ${task.title}`,
+      } satisfies TaskStatusChangePayload);
+    }
+
+    for (const [approvalId, pending] of this.pendingApprovals.entries()) {
+      pending.ws = ws;
+      const approval = this.approvalManager.getActiveApproval(pending.taskId);
+      if (!approval || approval.approvalId !== approvalId) {
+        continue;
+      }
+      this.sendEnvelope(
+        ws,
+        pending.requestId,
+        ServerEvents.ACTION_BLOCKED,
+        this.approvalManager.toBlockedPayload(approval),
+      );
+    }
+  }
+
+  private persistApprovalRecovery(approvalId: string): void {
+    if (!this.checkpointManager) return;
+    const pending = this.pendingApprovals.get(approvalId);
+    const approval = pending ? this.approvalManager.getActiveApproval(pending.taskId) : null;
+    if (!pending || !approval) return;
+
+    const record: ApprovalRecoveryRecord = {
+      approval,
+      taskId: pending.taskId,
+      requestId: pending.requestId,
+      traceId: pending.traceId,
+      messagesJson: JSON.stringify(pending.messages),
+      step: pending.step,
+      toolCallJson: JSON.stringify(pending.toolCall),
+      executionJson: JSON.stringify(pending.execution),
+      createdAt: new Date().toISOString(),
+    };
+    this.checkpointManager.saveApprovalRecovery(record);
+  }
+
+  private clearTaskRecoveryState(taskId: string): void {
+    this.checkpointManager?.deleteCheckpointsForTask(taskId);
+    this.checkpointManager?.deleteApprovalRecoveriesForTask(taskId);
+  }
+
   private reconcileInterruptedTasksOnStartup(): void {
     if (!this.checkpointManager) return;
+
+    const restoredTaskIds = new Set<string>();
+    for (const record of this.checkpointManager.loadApprovalRecoveries()) {
+      try {
+        const expiresAt = new Date(record.approval.expiresAt).getTime();
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+          this.checkpointManager.markTaskFailed(
+            record.taskId,
+            'AHA-POLICY-002',
+            'Approval expired while daemon was offline.',
+          );
+          this.clearTaskRecoveryState(record.taskId);
+          continue;
+        }
+
+        const task = this.checkpointManager.loadTask(record.taskId);
+        if (!task || task.status !== 'blocked') {
+          this.clearTaskRecoveryState(record.taskId);
+          continue;
+        }
+
+        this.taskManager.restoreTask(task);
+        this.approvalManager.restoreApproval(record.approval);
+        this.pendingApprovals.set(record.approval.approvalId, {
+          taskId: record.taskId,
+          requestId: record.requestId,
+          traceId: record.traceId,
+          messages: JSON.parse(record.messagesJson) as ChatMessage[],
+          step: record.step,
+          toolCall: JSON.parse(record.toolCallJson) as ToolCallRequest,
+          execution: JSON.parse(record.executionJson) as ExecutionContext,
+        });
+        restoredTaskIds.add(record.taskId);
+      } catch {
+        this.checkpointManager.markTaskFailed(
+          record.taskId,
+          'AHA-SYS-001',
+          'Task recovery data was corrupted after daemon restart.',
+        );
+        this.clearTaskRecoveryState(record.taskId);
+      }
+    }
 
     const pendingTasks = this.checkpointManager.loadPendingTasks();
     if (pendingTasks.length === 0) return;
 
     for (const task of pendingTasks) {
+      if (restoredTaskIds.has(task.id)) {
+        continue;
+      }
       const checkpoint = this.checkpointManager.loadCheckpoint(task.id);
       this.checkpointManager.markTaskFailed(
         task.id,
@@ -1692,6 +1822,7 @@ export class AhaApp {
 
     this.logProgress('startup_reconciled_interrupted_tasks', {
       count: pendingTasks.length,
+      restoredBlockedTasks: restoredTaskIds.size,
     });
   }
 }

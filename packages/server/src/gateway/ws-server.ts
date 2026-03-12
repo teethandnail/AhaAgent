@@ -12,6 +12,8 @@ export interface GatewayOptions {
   originPort?: number;
   /** TTL for idempotency keys in milliseconds. Default: 5 minutes. */
   idempotencyTtlMs?: number;
+  /** Called after a WebSocket client is fully authenticated. */
+  onConnect?: (ws: WebSocket) => void;
   /** Called when a valid, non-duplicate envelope is received. */
   onMessage?: (ws: WebSocket, envelope: WsEnvelope<Record<string, unknown>>) => void;
 }
@@ -68,6 +70,8 @@ export function createGateway(options: GatewayOptions): Gateway {
       ws.close(4401, 'Invalid session token');
       return;
     }
+
+    options.onConnect?.(ws);
 
     // Handle incoming messages
     ws.on('message', (raw: Buffer | string) => {
