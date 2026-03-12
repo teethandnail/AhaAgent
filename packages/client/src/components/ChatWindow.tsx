@@ -35,6 +35,7 @@ function formatElapsed(startedAt?: string): string | null {
 
 export function ChatWindow() {
   const [input, setInput] = useState('');
+  const [progressExpanded, setProgressExpanded] = useState(true);
   const [, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { messages, status, sendMessage, executionMode, activeTaskId, taskProgress, recentTaskEvents } =
@@ -60,6 +61,12 @@ export function ChatWindow() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [activeProgress?.startedAt]);
+
+  useEffect(() => {
+    if (activeTaskId) {
+      setProgressExpanded(true);
+    }
+  }, [activeTaskId]);
 
   const handleSend = () => {
     const trimmed = input.trim();
@@ -91,53 +98,82 @@ export function ChatWindow() {
         </span>
       </div>
 
-      {/* Messages area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {activeProgress && (
+      {activeProgress && (
+        <div className="px-4 pt-3 pb-2 shrink-0">
           <div
-            className="rounded-lg border px-4 py-3"
+            className="rounded-lg border shadow-sm"
             style={{ borderColor: 'var(--border)', backgroundColor: 'var(--muted)' }}
           >
-            <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => setProgressExpanded((value) => !value)}
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+            >
               <div className="flex items-center gap-2 min-w-0">
-                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[var(--primary)] animate-pulse" />
+                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[var(--primary)] animate-pulse shrink-0" />
                 <span className="text-sm font-medium">{stageLabel[activeProgress.stage] ?? 'Working'}</span>
                 {activeProgress.step && activeProgress.totalSteps ? (
                   <span
-                    className="text-xs px-2 py-0.5 rounded-full border"
+                    className="text-xs px-2 py-0.5 rounded-full border shrink-0"
                     style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}
                   >
                     Step {activeProgress.step}/{activeProgress.totalSteps}
                   </span>
                 ) : null}
-              </div>
-              {elapsed ? (
-                <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
-                  {elapsed}
+                <span
+                  className="text-sm truncate"
+                  style={{ color: 'var(--muted-foreground)' }}
+                >
+                  {activeProgress.message}
                 </span>
-              ) : null}
-            </div>
-            <p className="mt-2 text-sm">{activeProgress.message}</p>
-            {activeProgress.detail ? (
-              <p className="mt-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
-                {activeProgress.detail}
-              </p>
-            ) : null}
-            {visibleRecentEvents.length > 1 ? (
-              <div className="mt-3 space-y-1">
-                {visibleRecentEvents.slice(1).map((event, index) => (
-                  <div
-                    key={`${event.timestamp}-${index}`}
-                    className="text-xs"
-                    style={{ color: 'var(--muted-foreground)' }}
-                  >
-                    {event.message}
-                  </div>
-                ))}
               </div>
-            ) : null}
+              <div className="flex items-center gap-3 shrink-0">
+                {elapsed ? (
+                  <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                    {elapsed}
+                  </span>
+                ) : null}
+                <svg
+                  className={cn(
+                    'w-4 h-4 transition-transform',
+                    progressExpanded ? 'rotate-180' : 'rotate-0',
+                  )}
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M3.22 5.97a.75.75 0 011.06 0L8 9.69l3.72-3.72a.75.75 0 111.06 1.06l-4.25 4.25a.75.75 0 01-1.06 0L3.22 7.03a.75.75 0 010-1.06z" />
+                </svg>
+              </div>
+            </button>
+            {progressExpanded && (
+              <div className="px-4 pb-3 border-t" style={{ borderColor: 'var(--border)' }}>
+                {activeProgress.detail ? (
+                  <p className="mt-3 text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                    {activeProgress.detail}
+                  </p>
+                ) : null}
+                {visibleRecentEvents.length > 1 ? (
+                  <div className="mt-3 space-y-1.5">
+                    {visibleRecentEvents.slice(1).map((event, index) => (
+                      <div
+                        key={`${event.timestamp}-${index}`}
+                        className="text-xs"
+                        style={{ color: 'var(--muted-foreground)' }}
+                      >
+                        {event.message}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
-        )}
+        </div>
+      )}
+
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <p className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
