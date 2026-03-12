@@ -1,5 +1,10 @@
 # AhaAgent Policy Engine 决策表（V1）
 
+> 实现状态说明（2026-03-13）：
+> 本文档是策略目标表。当前代码已经实现大部分基础规则，但并未完整覆盖文档中的所有扩展/MCP 相关分支。
+> 已实现主线：会话与来源校验、工作区边界、敏感文件拦截、`secret` 禁止外发、assistant 禁止直接安装扩展、危险命令拦截、审批必需动作判断。
+> 未完全实现：扩展已安装/已启用/签名有效性的策略接入、高风险扩展工具 `invoke_extension_tool` 的完整审批链、文档里列出的更细粒度权限矩阵。
+
 ## 1. 目标
 
 定义统一授权决策：`allow` / `deny` / `require_approval`。
@@ -72,6 +77,8 @@ interface PolicyInput {
 | D-005 | `actor='assistant'` 且 `action='install_extension'` 直接执行 | deny | `AHA-POLICY-001`   |
 | D-006 | `extension` 未安装、未启用或签名无效                         | deny | `AHA-EXT-001`      |
 
+> 当前状态：D-001 至 D-005 已有对应实现；D-006 仍主要停留在设计目标，尚未形成完整策略闭环。
+
 ## 5. 需审批动作规则
 
 以下动作如果无有效审批，统一返回 `require_approval`：
@@ -95,6 +102,8 @@ interface PolicyInput {
 
 - `interactive`：严格按上述审批规则执行。
 - `autonomous`：在编排层可对 `write_file/delete_file/run_command` 做自动放行，但硬拒绝规则仍必须生效。
+
+> 当前状态：`diff_edit/write_file/delete_file/run_command/install_extension` 的审批要求已有主线实现；`invoke_extension_tool` 尚未完成接入。
 
 ## 6. 允许规则矩阵
 
@@ -121,6 +130,8 @@ interface PolicyInput {
 - `net.outbound`
 - `workspace.scoped:<path>`
 
+> 当前状态：设计目标。当前仓库未看到这套权限枚举在主流程中的完整执行态治理。
+
 ### 7.2 默认策略
 
 - 默认权限为空（`[]`）。
@@ -143,6 +154,8 @@ interface PolicyInput {
 - 破坏性文件命令：`rm -rf /`, `sudo rm`, `dd`, `mkfs`
 - 系统级高危命令：`chmod -R 777 /`, `chown -R /`
 - 未经授权的网络下载执行链：`curl ... | sh`, `wget ... | bash`
+
+> 当前状态：部分实现。当前代码已有危险命令阻断规则，但不等同于完整“允许命令白名单”体系。
 
 ## 9. 参考实现伪代码
 
