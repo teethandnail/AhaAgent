@@ -74,6 +74,46 @@ describe('MemoryController', () => {
     expect(retrieved!.sensitivity).toBe('secret');
   });
 
+  it('store deduplicates normalized duplicate content in the same category', () => {
+    const first = controller.store({
+      content: 'Project uses strict TypeScript mode.',
+      category: 'fact',
+      sensitivity: 'public',
+      metadata: { source: 'user' },
+    });
+
+    const second = controller.store({
+      content: '  project uses   strict typescript mode. ',
+      category: 'fact',
+      sensitivity: 'restricted',
+      metadata: { confidence: 'high' },
+    });
+
+    expect(second.id).toBe(first.id);
+    const retrieved = controller.get(first.id);
+    expect(retrieved).not.toBeNull();
+    expect(retrieved!.sensitivity).toBe('restricted');
+    expect(retrieved!.metadata).toEqual({ source: 'user', confidence: 'high' });
+
+    const rows = sqlite.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number };
+    expect(rows.count).toBe(1);
+  });
+
+  it('store keeps separate entries when categories differ', () => {
+    const first = controller.store({
+      content: 'User likes vim keybindings.',
+      category: 'preference',
+      sensitivity: 'public',
+    });
+    const second = controller.store({
+      content: 'User likes vim keybindings.',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+
+    expect(second.id).not.toBe(first.id);
+  });
+
   // --- get ---
 
   it('get returns stored memory', () => {

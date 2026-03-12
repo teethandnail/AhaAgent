@@ -29,6 +29,7 @@ import {
 } from './orchestrator/checkpoint-manager.js';
 import { MemoryController } from './memory/memory-controller.js';
 import { ContextManager } from './memory/context-manager.js';
+import { validateMemoryStoreInput } from './memory/validation.js';
 import { MutationQueue } from './orchestrator/mutation-queue.js';
 import { FileLock } from './orchestrator/file-lock.js';
 import { Sandbox } from './tools/sandbox.js';
@@ -1274,13 +1275,18 @@ export class AhaApp {
         if (!this.memoryController) {
           return { ok: false, error: 'Memory system not initialized.' };
         }
-        const mContent = typeof args.content === 'string' ? args.content : '';
-        const mCategory = typeof args.category === 'string' ? args.category : 'fact';
-        const mSensitivity = typeof args.sensitivity === 'string' ? args.sensitivity : 'public';
+        const validation = validateMemoryStoreInput({
+          content: typeof args.content === 'string' ? args.content : '',
+          category: typeof args.category === 'string' ? args.category : '',
+          sensitivity: typeof args.sensitivity === 'string' ? args.sensitivity : undefined,
+        });
+        if (!validation.ok) {
+          return { ok: false, error: validation.error };
+        }
         const mEntry = this.memoryController.store({
-          content: mContent,
-          category: mCategory as 'preference' | 'fact' | 'skill' | 'context',
-          sensitivity: mSensitivity as 'public' | 'restricted' | 'secret',
+          content: validation.value.content,
+          category: validation.value.category,
+          sensitivity: validation.value.sensitivity,
         });
         const maxEntries = parseInt(process.env.AHA_MEMORY_MAX_ENTRIES ?? '500', 10);
         this.memoryController.evict(maxEntries);

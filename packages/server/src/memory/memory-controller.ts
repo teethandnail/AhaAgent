@@ -16,6 +16,19 @@ export interface MemoryEntry {
   metadata?: Record<string, unknown>;
 }
 
+const SENSITIVITY_WEIGHT: Record<MemoryEntry['sensitivity'], number> = {
+  public: 0,
+  restricted: 1,
+  secret: 2,
+};
+
+function normalizeMemoryContent(content: string): string {
+  return content
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
 const CREATE_MEMORIES_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -63,6 +76,28 @@ export class MemoryController {
   store(
     entry: Omit<MemoryEntry, 'id' | 'accessCount' | 'lastAccessedAt' | 'createdAt'>,
   ): MemoryEntry {
+    const duplicate = this.findDuplicate(entry);
+    if (duplicate) {
+      const mergedMetadata = {
+        ...(duplicate.metadata ?? {}),
+        ...(entry.metadata ?? {}),
+      };
+      const upgradedSensitivity =
+        SENSITIVITY_WEIGHT[entry.sensitivity] > SENSITIVITY_WEIGHT[duplicate.sensitivity]
+          ? entry.sensitivity
+          : duplicate.sensitivity;
+
+      const updated = this.update(duplicate.id, {
+        content: entry.content.trim(),
+        sensitivity: upgradedSensitivity,
+        metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
+      });
+
+      if (updated) {
+        return updated;
+      }
+    }
+
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
 
@@ -264,5 +299,23 @@ export class MemoryController {
       createdAt: row.createdAt,
       ...(row.metadata != null ? { metadata: JSON.parse(row.metadata) } : {}),
     };
+  }
+
+  private findDuplicate(
+    entry: Omit<MemoryEntry, 'id' | 'accessCount' | 'lastAccessedAt' | 'createdAt'>,
+  ): MemoryEntry | null {
+    const normalized = normalizeMemoryContent(entry.content);
+    if (!normalized) return null;
+
+    const rows = this.db.select().from(memories).all();
+    for (const row of rows) {
+      if (row.category !== entry.category) {
+        continue;
+      }
+      if (normalizeMemoryContent(row.content) === normalized) {
+        return this.rowToEntry(row);
+      }
+    }
+    return null;
   }
 }
