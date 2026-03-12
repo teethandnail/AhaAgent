@@ -25,9 +25,14 @@ export function MemoryPanel({ open, onClose }: MemoryPanelProps) {
   const memoryLoading = useWebSocketStore((s) => s.memoryLoading);
   const listMemories = useWebSocketStore((s) => s.listMemories);
   const deleteMemory = useWebSocketStore((s) => s.deleteMemory);
+  const updateMemory = useWebSocketStore((s) => s.updateMemory);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<'' | 'preference' | 'fact' | 'skill' | 'context'>('');
   const [sensitivity, setSensitivity] = useState<'' | 'public' | 'restricted' | 'secret'>('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftContent, setDraftContent] = useState('');
+  const [draftCategory, setDraftCategory] = useState<'preference' | 'fact' | 'skill' | 'context'>('fact');
+  const [draftSensitivity, setDraftSensitivity] = useState<'public' | 'restricted' | 'secret'>('public');
 
   useEffect(() => {
     if (!open) return;
@@ -147,17 +152,94 @@ export function MemoryPanel({ open, onClose }: MemoryPanelProps) {
                   </span>
                 )}
               </div>
-              <button
-                onClick={() => deleteMemory(memory.id)}
-                className="text-xs px-2 py-1 rounded-md border hover:opacity-80"
-                style={{ borderColor: 'var(--border)', color: 'var(--destructive)' }}
-              >
-                Delete
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setEditingId(memory.id);
+                    setDraftContent(memory.content);
+                    setDraftCategory(memory.category);
+                    setDraftSensitivity(memory.sensitivity);
+                  }}
+                  className="text-xs px-2 py-1 rounded-md border hover:opacity-80"
+                  style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => deleteMemory(memory.id)}
+                  className="text-xs px-2 py-1 rounded-md border hover:opacity-80"
+                  style={{ borderColor: 'var(--border)', color: 'var(--destructive)' }}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
-            <p className="text-sm whitespace-pre-wrap" style={{ color: 'var(--foreground)' }}>
-              {memory.sensitivity === 'secret' ? '[Secret memory hidden]' : memory.content}
-            </p>
+            {editingId === memory.id ? (
+              <div className="space-y-3">
+                <textarea
+                  value={draftContent}
+                  onChange={(event) => setDraftContent(event.target.value)}
+                  rows={4}
+                  className="w-full rounded-md border px-3 py-2 text-sm outline-none resize-y"
+                  style={{
+                    borderColor: 'var(--border)',
+                    backgroundColor: 'var(--background)',
+                    color: 'var(--foreground)',
+                  }}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={draftCategory}
+                    onChange={(event) => setDraftCategory(event.target.value as typeof draftCategory)}
+                    className="rounded-md border px-2 py-2 text-sm"
+                    style={{ borderColor: 'var(--border)', backgroundColor: 'var(--background)' }}
+                  >
+                    <option value="preference">Preference</option>
+                    <option value="fact">Fact</option>
+                    <option value="skill">Skill</option>
+                    <option value="context">Context</option>
+                  </select>
+                  <select
+                    value={draftSensitivity}
+                    onChange={(event) => setDraftSensitivity(event.target.value as typeof draftSensitivity)}
+                    className="rounded-md border px-2 py-2 text-sm"
+                    style={{ borderColor: 'var(--border)', backgroundColor: 'var(--background)' }}
+                  >
+                    <option value="public">Public</option>
+                    <option value="restricted">Restricted</option>
+                    <option value="secret">Secret</option>
+                  </select>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setEditingId(null)}
+                    className="text-xs px-3 py-1.5 rounded-md border hover:opacity-80"
+                    style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      updateMemory({
+                        id: memory.id,
+                        content: draftContent,
+                        category: draftCategory,
+                        sensitivity: draftSensitivity,
+                      });
+                      setEditingId(null);
+                    }}
+                    className="text-xs px-3 py-1.5 rounded-md border hover:opacity-80"
+                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm whitespace-pre-wrap" style={{ color: 'var(--foreground)' }}>
+                {memory.sensitivity === 'secret' ? '[Secret memory hidden]' : memory.content}
+              </p>
+            )}
             <div className="text-[11px] flex justify-between" style={{ color: 'var(--muted-foreground)' }}>
               <span>Created {new Date(memory.createdAt).toLocaleString()}</span>
               <span>Accessed {memory.accessCount} times</span>

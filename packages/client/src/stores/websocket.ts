@@ -8,6 +8,7 @@ import type {
   ExecutionMode,
   MemoryListPayload,
   MemoryDeletedPayload,
+  MemoryUpdatedPayload,
 } from '@aha-agent/shared';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -71,6 +72,12 @@ interface WebSocketState {
     limit?: number;
   }) => void;
   deleteMemory: (id: string) => void;
+  updateMemory: (input: {
+    id: string;
+    content: string;
+    category: MemoryItem['category'];
+    sensitivity: MemoryItem['sensitivity'];
+  }) => void;
 }
 
 export const useWebSocketStore = create<WebSocketState>((set, get) => ({
@@ -155,6 +162,13 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
               memories: state.memories.filter((memory) => memory.id !== p.id),
             }));
           }
+        } else if (type === 'memory_updated') {
+          const p = payload as MemoryUpdatedPayload;
+          set((state) => ({
+            memories: state.memories.map((memory) =>
+              memory.id === p.item.id ? { ...memory, ...p.item } : memory,
+            ),
+          }));
         }
       } catch {
         /* ignore parse errors */
@@ -290,6 +304,27 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       timestamp: new Date().toISOString(),
       type: 'delete_memory',
       payload: { id },
+    });
+    set((state) => ({
+      rawMessages: [
+        ...state.rawMessages,
+        { direction: 'out' as const, data: envelope, timestamp: Date.now() },
+      ],
+    }));
+    socket.send(envelope);
+  },
+
+  updateMemory: (input) => {
+    const { socket } = get();
+    if (!socket) return;
+    const envelope = JSON.stringify({
+      protocolVersion: '1.0',
+      sessionId: get().sessionId,
+      requestId: crypto.randomUUID(),
+      idempotencyKey: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'update_memory',
+      payload: input,
     });
     set((state) => ({
       rawMessages: [

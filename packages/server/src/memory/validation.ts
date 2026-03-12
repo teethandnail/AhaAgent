@@ -24,14 +24,16 @@ export interface MemoryStoreInput {
   sensitivity?: string;
 }
 
+export interface ValidatedMemoryInput {
+  content: string;
+  category: MemoryEntry['category'];
+  sensitivity: MemoryEntry['sensitivity'];
+}
+
 export type MemoryStoreValidationResult =
   | {
       ok: true;
-      value: {
-        content: string;
-        category: MemoryEntry['category'];
-        sensitivity: MemoryEntry['sensitivity'];
-      };
+      value: ValidatedMemoryInput;
     }
   | {
       ok: false;
@@ -83,3 +85,5 @@ export function validateMemoryStoreInput(
     },
   };
 }
+
+export const validateMemoryUpdateInput = validateMemoryStoreInput;

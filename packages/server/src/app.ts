@@ -10,8 +10,10 @@ import {
   type CancelTaskPayload,
   type ListMemoriesPayload,
   type DeleteMemoryPayload,
+  type UpdateMemoryPayload,
   type MemoryListPayload,
   type MemoryDeletedPayload,
+  type MemoryUpdatedPayload,
   type ApprovalActionType,
   type RiskLevel,
   type ExecutionMode,
@@ -34,6 +36,7 @@ import {
 import { MemoryController } from './memory/memory-controller.js';
 import { ContextManager } from './memory/context-manager.js';
 import { validateMemoryStoreInput } from './memory/validation.js';
+import { validateMemoryUpdateInput } from './memory/validation.js';
 import { MutationQueue } from './orchestrator/mutation-queue.js';
 import { FileLock } from './orchestrator/file-lock.js';
 import { Sandbox } from './tools/sandbox.js';
@@ -521,6 +524,9 @@ export class AhaApp {
         break;
       case ClientEvents.DELETE_MEMORY:
         this.handleDeleteMemory(envelope as unknown as WsEnvelope<DeleteMemoryPayload>, ws, traceId);
+        break;
+      case ClientEvents.UPDATE_MEMORY:
+        this.handleUpdateMemory(envelope as unknown as WsEnvelope<UpdateMemoryPayload>, ws, traceId);
         break;
 
       default:
@@ -1736,6 +1742,62 @@ export class AhaApp {
     };
 
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.MEMORY_DELETED, payload);
+  }
+
+  private handleUpdateMemory(
+    envelope: WsEnvelope<UpdateMemoryPayload>,
+    ws: WebSocket,
+    traceId: string,
+  ): void {
+    if (!this.memoryController) {
+      this.sendError(ws, envelope.requestId, 'AHA-SYS-001', 'Memory system not initialized');
+      return;
+    }
+
+    const validation = validateMemoryUpdateInput({
+      content: envelope.payload.content,
+      category: envelope.payload.category,
+      sensitivity: envelope.payload.sensitivity,
+    });
+    if (!validation.ok) {
+      this.sendError(ws, envelope.requestId, 'AHA-TOOL-001', validation.error);
+      return;
+    }
+
+    const updated = this.memoryController.update(envelope.payload.id, {
+      content: validation.value.content,
+      category: validation.value.category,
+      sensitivity: validation.value.sensitivity,
+    });
+
+    if (!updated) {
+      this.sendError(ws, envelope.requestId, 'AHA-TASK-001', 'Memory not found');
+      return;
+    }
+
+    this.auditLogger.audit({
+      traceId,
+      taskId: '',
+      requestId: envelope.requestId,
+      actor: 'user',
+      action: 'update_memory',
+      result: 'updated',
+      details: { memoryId: updated.id },
+    });
+
+    const payload: MemoryUpdatedPayload = {
+      item: {
+        id: updated.id,
+        content: updated.content,
+        category: updated.category,
+        sensitivity: updated.sensitivity,
+        accessCount: updated.accessCount,
+        lastAccessedAt: updated.lastAccessedAt,
+        createdAt: updated.createdAt,
+      },
+    };
+
+    this.sendEnvelope(ws, envelope.requestId, ServerEvents.MEMORY_UPDATED, payload);
   }
 
   private logProgress(event: string, details?: Record<string, unknown>): void {

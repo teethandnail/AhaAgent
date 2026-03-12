@@ -5,6 +5,7 @@ import {
   type ListMemoriesPayload,
   type MemoryDeletedPayload,
   type MemoryListPayload,
+  type MemoryUpdatedPayload,
   ServerEvents,
   type ApproveActionPayload,
   type CancelTaskPayload,
@@ -14,6 +15,7 @@ import {
   type ActionBlockedPayload,
   type StreamChunkPayload,
   type WsEnvelope,
+  type UpdateMemoryPayload,
 } from './protocol.js';
 
 describe('protocol event constants', () => {
@@ -24,6 +26,7 @@ describe('protocol event constants', () => {
       CANCEL_TASK: 'cancel_task',
       LIST_MEMORIES: 'list_memories',
       DELETE_MEMORY: 'delete_memory',
+      UPDATE_MEMORY: 'update_memory',
     });
   });
 
@@ -35,6 +38,7 @@ describe('protocol event constants', () => {
       TASK_TERMINAL: 'task_terminal',
       MEMORY_LIST: 'memory_list',
       MEMORY_DELETED: 'memory_deleted',
+      MEMORY_UPDATED: 'memory_updated',
       ERROR: 'error',
     });
   });
@@ -100,6 +104,12 @@ describe('protocol payload contracts', () => {
     const remove: DeleteMemoryPayload = {
       id: 'memory-1',
     };
+    const update: UpdateMemoryPayload = {
+      id: 'memory-1',
+      content: 'Project uses TypeScript strict mode.',
+      category: 'fact',
+      sensitivity: 'public',
+    };
     const response: MemoryListPayload = {
       items: [
         {
@@ -118,11 +128,16 @@ describe('protocol payload contracts', () => {
       id: 'memory-1',
       deleted: true,
     };
+    const updated: MemoryUpdatedPayload = {
+      item: response.items[0]!,
+    };
 
     expect(list.limit).toBe(20);
     expect(remove.id).toBe('memory-1');
+    expect(update.id).toBe('memory-1');
     expect(response.items[0]?.score).toBe(0.91);
     expect(deleted.deleted).toBe(true);
+    expect(updated.item.id).toBe('memory-1');
   });
 
   it('supports typed server payloads for task lifecycle', () => {
