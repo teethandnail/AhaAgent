@@ -5,6 +5,7 @@ import { ChatWindow } from '@/components/ChatWindow';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
 import { DevConsole } from '@/components/DevConsole';
 import { TaskPanel } from '@/components/TaskPanel';
+import { MemoryPanel } from '@/components/MemoryPanel';
 import type {
   WsEnvelope,
   TaskStatusChangePayload,
@@ -15,6 +16,7 @@ import type {
 export default function App() {
   const [devConsoleOpen, setDevConsoleOpen] = useState(false);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const connect = useWebSocketStore((s) => s.connect);
   const executionMode = useWebSocketStore((s) => s.executionMode);
   const setExecutionMode = useWebSocketStore((s) => s.setExecutionMode);
@@ -123,6 +125,19 @@ export default function App() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setMemoryPanelOpen((o) => !o)}
+            className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border transition-colors hover:opacity-80"
+            style={{
+              borderColor: 'var(--border)',
+              color: 'var(--foreground)',
+            }}
+          >
+            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M3 2.5A1.5 1.5 0 014.5 1h7A1.5 1.5 0 0113 2.5v11a.5.5 0 01-.8.4L8 10.75 3.8 13.9a.5.5 0 01-.8-.4v-11zM4.5 2a.5.5 0 00-.5.5v10l3.7-2.775a.5.5 0 01.6 0L12 12.5v-10a.5.5 0 00-.5-.5h-7z" />
+            </svg>
+            Memory
+          </button>
         </div>
       </header>
 
@@ -131,6 +146,7 @@ export default function App() {
         <main className="flex-1 overflow-hidden">
           <ChatWindow />
         </main>
+        <MemoryPanel open={memoryPanelOpen} onClose={() => setMemoryPanelOpen(false)} />
         <TaskPanel open={taskPanelOpen} onClose={() => setTaskPanelOpen(false)} />
       </div>
 

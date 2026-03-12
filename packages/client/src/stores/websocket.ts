@@ -6,6 +6,8 @@ import type {
   ActionBlockedPayload,
   TaskTerminalPayload,
   ExecutionMode,
+  MemoryListPayload,
+  MemoryDeletedPayload,
 } from '@aha-agent/shared';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -34,6 +36,17 @@ export interface RawWsMessage {
   timestamp: number;
 }
 
+export interface MemoryItem {
+  id: string;
+  content: string;
+  category: 'preference' | 'fact' | 'skill' | 'context';
+  sensitivity: 'public' | 'restricted' | 'secret';
+  accessCount: number;
+  lastAccessedAt: string;
+  createdAt: string;
+  score?: number;
+}
+
 interface WebSocketState {
   socket: WebSocket | null;
   status: ConnectionStatus;
@@ -43,12 +56,21 @@ interface WebSocketState {
   executionMode: ExecutionMode;
   sessionId: string;
   rawMessages: RawWsMessage[];
+  memories: MemoryItem[];
+  memoryLoading: boolean;
   connect: (url: string) => void;
   disconnect: () => void;
   sendMessage: (text: string) => void;
   setExecutionMode: (mode: ExecutionMode) => void;
   approve: (approvalId: string, nonce: string, decision: 'approve' | 'reject') => void;
   cancelTask: (taskId: string) => void;
+  listMemories: (filters?: {
+    query?: string;
+    category?: MemoryItem['category'];
+    sensitivity?: MemoryItem['sensitivity'];
+    limit?: number;
+  }) => void;
+  deleteMemory: (id: string) => void;
 }
 
 export const useWebSocketStore = create<WebSocketState>((set, get) => ({
@@ -60,6 +82,8 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
   executionMode: 'interactive',
   sessionId: crypto.randomUUID(),
   rawMessages: [],
+  memories: [],
+  memoryLoading: false,
 
   connect: (url: string) => {
     set({ status: 'connecting' });
@@ -121,6 +145,16 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
           set({ taskState: p.state });
         } else if (type === 'task_terminal') {
           set({ taskState: 'idle', pendingApproval: null });
+        } else if (type === 'memory_list') {
+          const p = payload as MemoryListPayload;
+          set({ memories: p.items as MemoryItem[], memoryLoading: false });
+        } else if (type === 'memory_deleted') {
+          const p = payload as MemoryDeletedPayload;
+          if (p.deleted) {
+            set((state) => ({
+              memories: state.memories.filter((memory) => memory.id !== p.id),
+            }));
+          }
         }
       } catch {
         /* ignore parse errors */
@@ -208,6 +242,54 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       timestamp: new Date().toISOString(),
       type: 'cancel_task',
       payload: { taskId },
+    });
+    set((state) => ({
+      rawMessages: [
+        ...state.rawMessages,
+        { direction: 'out' as const, data: envelope, timestamp: Date.now() },
+      ],
+    }));
+    socket.send(envelope);
+  },
+
+  listMemories: (filters) => {
+    const { socket } = get();
+    if (!socket) return;
+    const envelope = JSON.stringify({
+      protocolVersion: '1.0',
+      sessionId: get().sessionId,
+      requestId: crypto.randomUUID(),
+      idempotencyKey: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'list_memories',
+      payload: {
+        query: filters?.query,
+        category: filters?.category,
+        sensitivity: filters?.sensitivity,
+        limit: filters?.limit,
+      },
+    });
+    set((state) => ({
+      memoryLoading: true,
+      rawMessages: [
+        ...state.rawMessages,
+        { direction: 'out' as const, data: envelope, timestamp: Date.now() },
+      ],
+    }));
+    socket.send(envelope);
+  },
+
+  deleteMemory: (id: string) => {
+    const { socket } = get();
+    if (!socket) return;
+    const envelope = JSON.stringify({
+      protocolVersion: '1.0',
+      sessionId: get().sessionId,
+      requestId: crypto.randomUUID(),
+      idempotencyKey: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'delete_memory',
+      payload: { id },
     });
     set((state) => ({
       rawMessages: [

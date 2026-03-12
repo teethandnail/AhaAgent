@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ClientEvents,
+  type DeleteMemoryPayload,
+  type ListMemoriesPayload,
+  type MemoryDeletedPayload,
+  type MemoryListPayload,
   ServerEvents,
   type ApproveActionPayload,
   type CancelTaskPayload,
@@ -18,6 +22,8 @@ describe('protocol event constants', () => {
       SEND_MESSAGE: 'send_message',
       APPROVE_ACTION: 'approve_action',
       CANCEL_TASK: 'cancel_task',
+      LIST_MEMORIES: 'list_memories',
+      DELETE_MEMORY: 'delete_memory',
     });
   });
 
@@ -27,6 +33,8 @@ describe('protocol event constants', () => {
       TASK_STATUS_CHANGE: 'task_status_change',
       ACTION_BLOCKED: 'action_blocked',
       TASK_TERMINAL: 'task_terminal',
+      MEMORY_LIST: 'memory_list',
+      MEMORY_DELETED: 'memory_deleted',
       ERROR: 'error',
     });
   });
@@ -80,6 +88,41 @@ describe('protocol payload contracts', () => {
 
     expect(approval.decision).toBe('approve');
     expect(cancel.reason).toBe('user cancelled');
+  });
+
+  it('supports typed memory management payloads', () => {
+    const list: ListMemoriesPayload = {
+      query: 'typescript',
+      category: 'fact',
+      sensitivity: 'public',
+      limit: 20,
+    };
+    const remove: DeleteMemoryPayload = {
+      id: 'memory-1',
+    };
+    const response: MemoryListPayload = {
+      items: [
+        {
+          id: 'memory-1',
+          content: 'Project uses TypeScript strict mode.',
+          category: 'fact',
+          sensitivity: 'public',
+          accessCount: 3,
+          lastAccessedAt: '2026-03-13T00:00:00.000Z',
+          createdAt: '2026-03-12T00:00:00.000Z',
+          score: 0.91,
+        },
+      ],
+    };
+    const deleted: MemoryDeletedPayload = {
+      id: 'memory-1',
+      deleted: true,
+    };
+
+    expect(list.limit).toBe(20);
+    expect(remove.id).toBe('memory-1');
+    expect(response.items[0]?.score).toBe(0.91);
+    expect(deleted.deleted).toBe(true);
   });
 
   it('supports typed server payloads for task lifecycle', () => {

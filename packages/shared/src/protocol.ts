@@ -43,6 +43,17 @@ export interface CancelTaskPayload {
   reason?: string;
 }
 
+export interface ListMemoriesPayload {
+  query?: string;
+  category?: 'preference' | 'fact' | 'skill' | 'context';
+  sensitivity?: 'public' | 'restricted' | 'secret';
+  limit?: number;
+}
+
+export interface DeleteMemoryPayload {
+  id: string;
+}
+
 // Server -> Client events
 export interface StreamChunkPayload {
   taskId: string;
@@ -94,6 +105,26 @@ export interface ErrorPayload {
   details?: Record<string, unknown>;
 }
 
+export interface MemoryListItemPayload {
+  id: string;
+  content: string;
+  category: 'preference' | 'fact' | 'skill' | 'context';
+  sensitivity: 'public' | 'restricted' | 'secret';
+  accessCount: number;
+  lastAccessedAt: string;
+  createdAt: string;
+  score?: number;
+}
+
+export interface MemoryListPayload {
+  items: MemoryListItemPayload[];
+}
+
+export interface MemoryDeletedPayload {
+  id: string;
+  deleted: boolean;
+}
+
 // Shared enums/types
 export type TaskState =
   | 'pending'
@@ -121,6 +152,8 @@ export const ClientEvents = {
   SEND_MESSAGE: 'send_message',
   APPROVE_ACTION: 'approve_action',
   CANCEL_TASK: 'cancel_task',
+  LIST_MEMORIES: 'list_memories',
+  DELETE_MEMORY: 'delete_memory',
 } as const;
 
 export const ServerEvents = {
@@ -128,5 +161,7 @@ export const ServerEvents = {
   TASK_STATUS_CHANGE: 'task_status_change',
   ACTION_BLOCKED: 'action_blocked',
   TASK_TERMINAL: 'task_terminal',
+  MEMORY_LIST: 'memory_list',
+  MEMORY_DELETED: 'memory_deleted',
   ERROR: 'error',
 } as const;

@@ -3,7 +3,7 @@ import type { Database as SqliteDatabase } from 'better-sqlite3';
 import { eq, sql } from 'drizzle-orm';
 import type { AppDatabase } from '../db/client.js';
 import { memories } from '../db/schema.js';
-import { recallWithFts, type RecallOptions } from './recall.js';
+import { recallWithFts, rerankMemories, type RecallOptions } from './recall.js';
 
 export interface MemoryEntry {
   id: string;
@@ -14,6 +14,10 @@ export interface MemoryEntry {
   lastAccessedAt: string;
   createdAt: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface RankedMemoryEntry extends MemoryEntry {
+  score?: number;
 }
 
 const SENSITIVITY_WEIGHT: Record<MemoryEntry['sensitivity'], number> = {
@@ -144,8 +148,10 @@ export class MemoryController {
 
     const now = new Date().toISOString();
     const results: MemoryEntry[] = [];
+    const baseRanks = new Map<string, number>();
 
     for (const row of rows) {
+      baseRanks.set(row.id, row.rank);
       // Get full entry from drizzle
       const entry = this.get(row.id);
       if (!entry) continue;
@@ -165,7 +171,38 @@ export class MemoryController {
       results.push(entry);
     }
 
-    return results;
+    return rerankMemories(query, results, baseRanks);
+  }
+
+  list(options?: {
+    query?: string;
+    category?: MemoryEntry['category'];
+    sensitivity?: MemoryEntry['sensitivity'];
+    limit?: number;
+  }): RankedMemoryEntry[] {
+    const limit = Math.max(1, Math.min(200, options?.limit ?? 50));
+
+    if (options?.query?.trim()) {
+      return this.recall(options.query, {
+        topK: limit,
+        includeRestricted: options.sensitivity === 'restricted',
+        category: options.category,
+      }).filter((entry) =>
+        options?.sensitivity ? entry.sensitivity === options.sensitivity : true,
+      );
+    }
+
+    const rows = this.db.select().from(memories).all();
+    return rows
+      .map((row) => this.rowToEntry(row))
+      .filter((entry) => (options?.category ? entry.category === options.category : true))
+      .filter((entry) => (options?.sensitivity ? entry.sensitivity === options.sensitivity : true))
+      .sort((a, b) => {
+        const aTime = new Date(a.lastAccessedAt).getTime();
+        const bTime = new Date(b.lastAccessedAt).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, limit);
   }
 
   /** Get a memory by ID. Returns null if not found. */

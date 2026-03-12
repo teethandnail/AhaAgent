@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from '../db/schema.js';
 import { MemoryController } from './memory-controller.js';
-import { buildFtsQuery, containsCJK } from './recall.js';
+import { buildFtsQuery, containsCJK, rerankMemories } from './recall.js';
 
 function createInMemoryDb() {
   const sqlite = new Database(':memory:');
@@ -426,6 +426,91 @@ describe('MemoryController', () => {
     const results = controller.recall('dark theme', { category: 'preference' });
     expect(results.length).toBe(1);
     expect(results[0]!.category).toBe('preference');
+  });
+
+  it('reranks exact matches ahead of partial matches', () => {
+    const ranked = rerankMemories(
+      'strict typescript',
+      [
+        {
+          id: 'a',
+          content: 'Project uses strict typescript mode.',
+          category: 'fact',
+          sensitivity: 'public',
+          accessCount: 1,
+          lastAccessedAt: '2026-03-13T00:00:00.000Z',
+          createdAt: '2026-03-12T00:00:00.000Z',
+        },
+        {
+          id: 'b',
+          content: 'Project uses typescript.',
+          category: 'fact',
+          sensitivity: 'public',
+          accessCount: 5,
+          lastAccessedAt: '2026-03-13T00:00:00.000Z',
+          createdAt: '2026-03-12T00:00:00.000Z',
+        },
+      ],
+      new Map([
+        ['a', 0.1],
+        ['b', 0.1],
+      ]),
+    );
+
+    expect(ranked[0]!.id).toBe('a');
+  });
+
+  it('reranks preferred category higher when query implies preference', () => {
+    const ranked = rerankMemories(
+      'user preference for theme',
+      [
+        {
+          id: 'fact',
+          content: 'Theme is enabled by default.',
+          category: 'fact',
+          sensitivity: 'public',
+          accessCount: 2,
+          lastAccessedAt: '2026-03-13T00:00:00.000Z',
+          createdAt: '2026-03-12T00:00:00.000Z',
+        },
+        {
+          id: 'preference',
+          content: 'User prefers a dark theme.',
+          category: 'preference',
+          sensitivity: 'public',
+          accessCount: 1,
+          lastAccessedAt: '2026-03-13T00:00:00.000Z',
+          createdAt: '2026-03-12T00:00:00.000Z',
+        },
+      ],
+      new Map([
+        ['fact', 0.1],
+        ['preference', 0.1],
+      ]),
+    );
+
+    expect(ranked[0]!.id).toBe('preference');
+  });
+
+  it('list returns recent memories when query is omitted', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-12T00:00:00.000Z'));
+    const older = controller.store({
+      content: 'Older fact memory.',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    vi.setSystemTime(new Date('2026-03-13T00:00:00.000Z'));
+    const newer = controller.store({
+      content: 'Newer fact memory.',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    const listed = controller.list({ limit: 10 });
+
+    expect(listed.length).toBeGreaterThanOrEqual(2);
+    expect(listed[0]!.id).toBe(newer.id);
+    vi.useRealTimers();
   });
 
   // --- CJK LIKE-based recall ---

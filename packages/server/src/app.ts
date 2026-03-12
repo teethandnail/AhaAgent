@@ -8,6 +8,10 @@ import {
   type SendMessagePayload,
   type ApproveActionPayload,
   type CancelTaskPayload,
+  type ListMemoriesPayload,
+  type DeleteMemoryPayload,
+  type MemoryListPayload,
+  type MemoryDeletedPayload,
   type ApprovalActionType,
   type RiskLevel,
   type ExecutionMode,
@@ -511,6 +515,12 @@ export class AhaApp {
 
       case ClientEvents.CANCEL_TASK:
         this.handleCancelTask(envelope as unknown as WsEnvelope<CancelTaskPayload>, ws, traceId);
+        break;
+      case ClientEvents.LIST_MEMORIES:
+        this.handleListMemories(envelope as unknown as WsEnvelope<ListMemoriesPayload>, ws);
+        break;
+      case ClientEvents.DELETE_MEMORY:
+        this.handleDeleteMemory(envelope as unknown as WsEnvelope<DeleteMemoryPayload>, ws, traceId);
         break;
 
       default:
@@ -1665,6 +1675,67 @@ export class AhaApp {
       taskId: payload.taskId,
       reason: terminalPayload.summary,
     });
+  }
+
+  private handleListMemories(
+    envelope: WsEnvelope<ListMemoriesPayload>,
+    ws: WebSocket,
+  ): void {
+    if (!this.memoryController) {
+      this.sendError(ws, envelope.requestId, 'AHA-SYS-001', 'Memory system not initialized');
+      return;
+    }
+
+    const items = this.memoryController.list({
+      query: envelope.payload.query,
+      category: envelope.payload.category,
+      sensitivity: envelope.payload.sensitivity,
+      limit: envelope.payload.limit,
+    });
+
+    const payload: MemoryListPayload = {
+      items: items.map((item) => ({
+        id: item.id,
+        content: item.content,
+        category: item.category,
+        sensitivity: item.sensitivity,
+        accessCount: item.accessCount,
+        lastAccessedAt: item.lastAccessedAt,
+        createdAt: item.createdAt,
+        score: item.score,
+      })),
+    };
+
+    this.sendEnvelope(ws, envelope.requestId, ServerEvents.MEMORY_LIST, payload);
+  }
+
+  private handleDeleteMemory(
+    envelope: WsEnvelope<DeleteMemoryPayload>,
+    ws: WebSocket,
+    traceId: string,
+  ): void {
+    if (!this.memoryController) {
+      this.sendError(ws, envelope.requestId, 'AHA-SYS-001', 'Memory system not initialized');
+      return;
+    }
+
+    const deleted = this.memoryController.delete(envelope.payload.id);
+    this.auditLogger.audit({
+      traceId,
+      taskId: '',
+      requestId: envelope.requestId,
+      actor: 'user',
+      action: 'delete_memory',
+      result: deleted ? 'deleted' : 'not_found',
+      details: { memoryId: envelope.payload.id },
+    });
+
+    const payload: MemoryDeletedPayload = {
+      id: envelope.payload.id,
+      deleted,
+    };
+
+    this.sendEnvelope(ws, envelope.requestId, ServerEvents.MEMORY_DELETED, payload);
   }
 
   private logProgress(event: string, details?: Record<string, unknown>): void {

@@ -39,6 +39,16 @@ export interface FtsRecallRow {
   rank: number;
 }
 
+export interface RerankableMemory {
+  id: string;
+  content: string;
+  category: string;
+  sensitivity: string;
+  accessCount: number;
+  lastAccessedAt: string;
+  createdAt: string;
+}
+
 /** Common Chinese stop words to filter out from LIKE searches. */
 const CJK_STOP_WORDS = new Set([
   '的', '了', '是', '在', '我', '你', '他', '她', '它', '们',
@@ -161,4 +171,73 @@ export function recallWithFts(
   `;
 
   return sqlite.prepare(sql).all(...params) as FtsRecallRow[];
+}
+
+function extractQueryTerms(query: string): string[] {
+  if (containsCJK(query)) {
+    return tokenizeForLike(query).map((term) => term.toLowerCase());
+  }
+
+  return (
+    query
+      .match(/[\p{L}\p{N}_]+/gu)
+      ?.map((term) => term.trim().toLowerCase())
+      .filter((term) => term.length > 0) ?? []
+  );
+}
+
+function inferCategoryBoost(query: string, category: string): number {
+  const q = query.toLowerCase();
+  if (/(prefer|preference|like|likes|habit|theme|style|喜欢|偏好|习惯)/i.test(q)) {
+    return category === 'preference' ? 0.18 : 0;
+  }
+  if (/(project|stack|uses|config|architecture|项目|技术栈|配置|架构)/i.test(q)) {
+    return category === 'fact' ? 0.16 : 0;
+  }
+  if (/(how to|workflow|skill|技巧|方法|流程)/i.test(q)) {
+    return category === 'skill' ? 0.14 : 0;
+  }
+  if (/(session|conversation|previous|刚才|上次|对话)/i.test(q)) {
+    return category === 'context' ? 0.12 : 0;
+  }
+  return 0;
+}
+
+export function rerankMemories<T extends RerankableMemory>(
+  query: string,
+  items: T[],
+  baseRanks: Map<string, number>,
+): Array<T & { score: number }> {
+  const terms = extractQueryTerms(query);
+  const now = Date.now();
+
+  return items
+    .map((item) => {
+      const contentLower = item.content.toLowerCase();
+      const matchCount = terms.filter((term) => contentLower.includes(term)).length;
+      const textScore =
+        terms.length === 0 ? 0
+        : matchCount === terms.length ? 0.45
+        : (matchCount / terms.length) * 0.35;
+
+      const exactPhraseScore = contentLower.includes(query.trim().toLowerCase()) ? 0.18 : 0;
+      const baseRank = baseRanks.get(item.id);
+      const baseScore =
+        typeof baseRank === 'number' ? 1 / (1 + Math.max(0, baseRank)) : 0.1;
+
+      const lastAccessedAt = new Date(item.lastAccessedAt).getTime();
+      const recencyDays = Number.isFinite(lastAccessedAt)
+        ? Math.max(0, (now - lastAccessedAt) / (1000 * 60 * 60 * 24))
+        : 365;
+      const recencyScore = 0.14 / (1 + recencyDays);
+      const frequencyScore = Math.min(0.14, Math.log10(item.accessCount + 1) * 0.1);
+      const categoryScore = inferCategoryBoost(query, item.category);
+
+      return {
+        ...item,
+        score:
+          Number((textScore + exactPhraseScore + baseScore * 0.18 + recencyScore + frequencyScore + categoryScore).toFixed(4)),
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 }
