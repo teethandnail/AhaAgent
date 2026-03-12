@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildEmbeddingInput,
@@ -15,6 +16,12 @@ describe('embedding helpers', () => {
   });
 
   it('loadEmbeddingConfig returns undefined without configuration', () => {
+    delete process.env.AHA_EMBEDDING_API_KEY;
+    delete process.env.AHA_EMBEDDING_MODEL;
+    delete process.env.AHA_EMBEDDING_BASE_URL;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(() => {
+      throw new Error('missing');
+    });
     expect(loadEmbeddingConfig()).toBeUndefined();
   });
 

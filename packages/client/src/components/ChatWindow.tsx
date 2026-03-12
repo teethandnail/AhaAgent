@@ -11,14 +11,55 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   error: { color: 'bg-red-500', label: 'Error' },
 };
 
+const stageLabel: Record<string, string> = {
+  created: 'Preparing',
+  thinking: 'Thinking',
+  memory: 'Memory',
+  tool: 'Tool',
+  waiting_approval: 'Waiting for approval',
+  responding: 'Responding',
+  completed: 'Completed',
+  failed: 'Stopped',
+};
+
+function formatElapsed(startedAt?: string): string | null {
+  if (!startedAt) return null;
+  const deltaMs = Date.now() - new Date(startedAt).getTime();
+  if (!Number.isFinite(deltaMs) || deltaMs < 0) return null;
+  const seconds = Math.floor(deltaMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remain = seconds % 60;
+  return `${minutes}m ${remain}s`;
+}
+
 export function ChatWindow() {
   const [input, setInput] = useState('');
+  const [, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { messages, status, sendMessage, executionMode } = useWebSocketStore();
+  const { messages, status, sendMessage, executionMode, activeTaskId, taskProgress, recentTaskEvents } =
+    useWebSocketStore();
+  const statusInfo = statusConfig[status] ?? statusConfig['disconnected'];
+  const activeProgress = activeTaskId ? taskProgress[activeTaskId] : null;
+  const visibleRecentEvents =
+    activeTaskId
+      ? recentTaskEvents.filter((event) => event.taskId === activeTaskId).slice(-3).reverse()
+      : [];
+  const elapsed = formatElapsed(activeProgress?.startedAt);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!activeProgress?.startedAt) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeProgress?.startedAt]);
 
   const handleSend = () => {
     const trimmed = input.trim();
@@ -33,8 +74,6 @@ export function ChatWindow() {
       handleSend();
     }
   };
-
-  const statusInfo = statusConfig[status] ?? statusConfig['disconnected'];
 
   return (
     <div className="flex flex-col h-full">
@@ -54,6 +93,51 @@ export function ChatWindow() {
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {activeProgress && (
+          <div
+            className="rounded-lg border px-4 py-3"
+            style={{ borderColor: 'var(--border)', backgroundColor: 'var(--muted)' }}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[var(--primary)] animate-pulse" />
+                <span className="text-sm font-medium">{stageLabel[activeProgress.stage] ?? 'Working'}</span>
+                {activeProgress.step && activeProgress.totalSteps ? (
+                  <span
+                    className="text-xs px-2 py-0.5 rounded-full border"
+                    style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}
+                  >
+                    Step {activeProgress.step}/{activeProgress.totalSteps}
+                  </span>
+                ) : null}
+              </div>
+              {elapsed ? (
+                <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                  {elapsed}
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-2 text-sm">{activeProgress.message}</p>
+            {activeProgress.detail ? (
+              <p className="mt-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                {activeProgress.detail}
+              </p>
+            ) : null}
+            {visibleRecentEvents.length > 1 ? (
+              <div className="mt-3 space-y-1">
+                {visibleRecentEvents.slice(1).map((event, index) => (
+                  <div
+                    key={`${event.timestamp}-${index}`}
+                    className="text-xs"
+                    style={{ color: 'var(--muted-foreground)' }}
+                  >
+                    {event.message}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )}
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <p className="text-sm" style={{ color: 'var(--muted-foreground)' }}>

@@ -11,6 +11,7 @@ import {
   type CancelTaskPayload,
   type SendMessagePayload,
   type TaskTerminalPayload,
+  type TaskProgressPayload,
   type TaskStatusChangePayload,
   type ActionBlockedPayload,
   type StreamChunkPayload,
@@ -34,6 +35,7 @@ describe('protocol event constants', () => {
     expect(ServerEvents).toEqual({
       STREAM_CHUNK: 'stream_chunk',
       TASK_STATUS_CHANGE: 'task_status_change',
+      TASK_PROGRESS: 'task_progress',
       ACTION_BLOCKED: 'action_blocked',
       TASK_TERMINAL: 'task_terminal',
       MEMORY_LIST: 'memory_list',
@@ -172,6 +174,17 @@ describe('protocol payload contracts', () => {
       chunk: 'partial output',
       isFinal: false,
     };
+    const progress: TaskProgressPayload = {
+      taskId: 'task-1',
+      stage: 'tool',
+      message: 'Searching stored memory',
+      detail: 'memory_search',
+      step: 1,
+      totalSteps: 16,
+      toolName: 'memory_search',
+      startedAt: '2026-03-13T00:00:00.000Z',
+      timestamp: '2026-03-13T00:00:05.000Z',
+    };
     const terminal: TaskTerminalPayload = {
       taskId: 'task-1',
       state: 'success',
@@ -181,6 +194,7 @@ describe('protocol payload contracts', () => {
     expect(status.state).toBe('running');
     expect(blocked.actionType).toBe('run_command');
     expect(chunk.isFinal).toBe(false);
+    expect(progress.stage).toBe('tool');
     expect(terminal.state).toBe('success');
   });
 });

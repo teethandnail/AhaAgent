@@ -19,6 +19,7 @@ import {
   type ExecutionMode,
   type StreamChunkPayload,
   type TaskStatusChangePayload,
+  type TaskProgressPayload,
   type TaskTerminalPayload,
   type ErrorPayload,
   type PolicyAction,
@@ -76,6 +77,15 @@ interface PendingApprovalContext {
   step: number;
   toolCall: ToolCallRequest;
   execution: ExecutionContext;
+}
+
+interface TaskProgressOptions {
+  stage: TaskProgressPayload['stage'];
+  message: string;
+  detail?: string;
+  step?: number;
+  execution?: ExecutionContext;
+  toolName?: string;
 }
 
 interface RuntimeBudget {
@@ -393,6 +403,7 @@ export class AhaApp {
   private browserAutomation: BrowserAutomationService;
   private pendingApprovals = new Map<string, PendingApprovalContext>();
   private conversationHistories = new Map<string, ChatMessage[]>();
+  private taskStartedAt = new Map<string, string>();
 
   private db: AppDatabase | null = null;
   private sqlite: SqliteDatabase | null = null;
@@ -551,6 +562,7 @@ export class AhaApp {
 
     // Create a task
     const task = this.taskManager.createTask(payload.text);
+    this.taskStartedAt.set(task.id, new Date().toISOString());
     this.logProgress('task_created', {
       taskId: task.id,
       requestId: envelope.requestId,
@@ -581,6 +593,11 @@ export class AhaApp {
     };
 
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
+    this.emitTaskProgress(ws, envelope.requestId, task.id, {
+      stage: 'created',
+      message: 'Task created. Preparing the request.',
+      execution,
+    });
 
     // Continue task execution asynchronously so the gateway thread stays responsive.
     void this.runLLMTask(task.id, payload.text, envelope.requestId, ws, traceId, execution, payload.conversationId);
@@ -596,6 +613,11 @@ export class AhaApp {
     conversationId: string,
   ): Promise<void> {
     this.logProgress('llm_task_started', { taskId, requestId });
+    this.emitTaskProgress(ws, requestId, taskId, {
+      stage: 'thinking',
+      message: 'Understanding your request and planning the next step.',
+      execution,
+    });
     if (!this.llmRouter) {
       this.taskManager.transition(taskId, 'failed');
       const terminalPayload: TaskTerminalPayload = {
@@ -605,6 +627,11 @@ export class AhaApp {
         errorCode: 'AHA-LLM-001',
       };
       this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+      this.emitTaskProgress(ws, requestId, taskId, {
+        stage: 'failed',
+        message: terminalPayload.summary,
+        execution,
+      });
       this.logProgress('task_failed', { taskId, reason: terminalPayload.summary });
       return;
     }
@@ -666,6 +693,11 @@ export class AhaApp {
         errorCode: 'AHA-LLM-002',
       };
       this.sendEnvelope(ws, requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+      this.emitTaskProgress(ws, requestId, taskId, {
+        stage: 'failed',
+        message: `LLM request failed: ${errMsg}`,
+        execution,
+      });
       this.logProgress('task_failed', { taskId, reason: errMsg });
     }
   }
@@ -691,6 +723,13 @@ export class AhaApp {
         // Phase 1: Memory Flush
         if (this.contextManager.needsFlush(params.messages)) {
           this.logProgress('memory_flush_start', { taskId: params.taskId, step });
+          this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+            stage: 'memory',
+            message: 'Saving durable details into long-term memory.',
+            detail: 'memory_flush',
+            step,
+            execution: params.execution,
+          });
           const flushMessages: ChatMessage[] = [
             { role: 'system', content: this.contextManager.flushPrompt },
             ...params.messages.slice(1),
@@ -718,6 +757,13 @@ export class AhaApp {
         // Phase 2: Compaction
         if (this.contextManager.needsCompaction(params.messages)) {
           this.logProgress('compaction_start', { taskId: params.taskId, step });
+          this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+            stage: 'thinking',
+            message: 'Condensing earlier context to stay within the model window.',
+            detail: 'context_compaction',
+            step,
+            execution: params.execution,
+          });
           const { system, old, recent } = this.contextManager.splitForCompaction(params.messages);
           if (old.length > 0) {
             const summaryMessages: ChatMessage[] = [
@@ -748,6 +794,19 @@ export class AhaApp {
         step,
         toolCalls: response.toolCalls?.length ?? 0,
         mode: params.execution.mode,
+      });
+      this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+        stage: response.toolCalls && response.toolCalls.length > 0 ? 'tool' : 'responding',
+        message:
+          response.toolCalls && response.toolCalls.length > 0
+            ? 'The agent chose the next action.'
+            : 'Generating the final answer.',
+        detail:
+          response.toolCalls && response.toolCalls.length > 0
+            ? `${response.toolCalls.length.toString()} tool call(s)`
+            : undefined,
+        step,
+        execution: params.execution,
       });
 
       if (response.toolCalls && response.toolCalls.length > 0) {
@@ -780,6 +839,17 @@ export class AhaApp {
                 ? parsedArgs.action
                 : undefined,
           });
+          this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+            stage: tc.name === 'memory_search' || tc.name === 'memory_store' ? 'memory' : 'tool',
+            message: this.describeToolProgress(tc.name, parsedArgs),
+            detail:
+              tc.name === 'browser_tool' && parsedArgs && typeof parsedArgs.action === 'string'
+                ? `browser:${parsedArgs.action}`
+                : tc.name,
+            step,
+            execution: params.execution,
+            toolName: tc.name,
+          });
           const policyResult = this.evaluateToolPolicy(tc.name, tc.arguments, false);
           if (policyResult.decision === 'deny') {
             params.messages.push({
@@ -807,6 +877,13 @@ export class AhaApp {
                   errorCode: 'AHA-POLICY-001',
                 } satisfies TaskTerminalPayload);
                 this.logProgress('task_failed', { taskId: params.taskId, reason: budgetOk.reason });
+                this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+                  stage: 'failed',
+                  message: budgetOk.reason,
+                  step,
+                  execution: params.execution,
+                  toolName: tc.name,
+                });
                 return;
               }
               this.logProgress('tool_auto_approved', {
@@ -827,6 +904,14 @@ export class AhaApp {
                 ok: autoResult.ok === true,
                 error: typeof autoResult.error === 'string' ? autoResult.error : undefined,
                 mode: params.execution.mode,
+              });
+              this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+                stage: 'thinking',
+                message: autoResult.ok ? 'Tool finished. Reviewing the result.' : 'Tool failed. Adjusting the plan.',
+                detail: tc.name,
+                step,
+                execution: params.execution,
+                toolName: tc.name,
               });
               params.messages.push({
                 role: 'tool',
@@ -881,6 +966,14 @@ export class AhaApp {
 
             const blockedPayload = this.approvalManager.toBlockedPayload(approval);
             this.sendEnvelope(params.ws, params.requestId, ServerEvents.ACTION_BLOCKED, blockedPayload);
+            this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+              stage: 'waiting_approval',
+              message: `Waiting for approval before ${tc.name}.`,
+              detail: this.describeToolTarget(tc.name, tc.arguments),
+              step,
+              execution: params.execution,
+              toolName: tc.name,
+            });
             this.logProgress('approval_required', {
               taskId: params.taskId,
               approvalId: approval.approvalId,
@@ -900,6 +993,13 @@ export class AhaApp {
               errorCode: 'AHA-POLICY-001',
             } satisfies TaskTerminalPayload);
             this.logProgress('task_failed', { taskId: params.taskId, reason: budgetOk.reason });
+            this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+              stage: 'failed',
+              message: budgetOk.reason,
+              step,
+              execution: params.execution,
+              toolName: tc.name,
+            });
             return;
           }
 
@@ -914,6 +1014,14 @@ export class AhaApp {
             tool: tc.name,
             ok: toolResult.ok === true,
             error: typeof toolResult.error === 'string' ? toolResult.error : undefined,
+          });
+          this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+            stage: 'thinking',
+            message: toolResult.ok ? 'Tool finished. Updating the answer.' : 'Tool failed. Trying the next step.',
+            detail: tc.name,
+            step,
+            execution: params.execution,
+            toolName: tc.name,
           });
           params.messages.push({
             role: 'tool',
@@ -937,7 +1045,14 @@ export class AhaApp {
         state: 'success',
         summary: 'Task completed',
       } satisfies TaskTerminalPayload);
+      this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+        stage: 'completed',
+        message: 'Answer ready.',
+        step,
+        execution: params.execution,
+      });
       this.logProgress('task_success', { taskId: params.taskId });
+      this.taskStartedAt.delete(params.taskId);
       return;
     }
 
@@ -949,10 +1064,17 @@ export class AhaApp {
       summary: `Task aborted after exceeding ${stepsLimit.toString()} tool iterations.`,
       errorCode: 'AHA-LLM-002',
     } satisfies TaskTerminalPayload);
+    this.emitTaskProgress(params.ws, params.requestId, params.taskId, {
+      stage: 'failed',
+      message: `Stopped after reaching the ${stepsLimit.toString()}-step limit.`,
+      step: stepsLimit,
+      execution: params.execution,
+    });
     this.logProgress('task_failed', {
       taskId: params.taskId,
       reason: `exceeded ${stepsLimit.toString()} steps`,
     });
+    this.taskStartedAt.delete(params.taskId);
   }
 
   private resolveWorkspacePath(inputPath: string): string {
@@ -1564,10 +1686,16 @@ export class AhaApp {
         summary: 'Action rejected by user',
         errorCode: 'AHA-POLICY-002',
       } satisfies TaskTerminalPayload);
+      this.emitTaskProgress(ws, pending.requestId, payload.taskId, {
+        stage: 'failed',
+        message: 'Action rejected by user.',
+        execution: pending.execution,
+      });
       this.logProgress('task_failed', {
         taskId: payload.taskId,
         reason: 'approval rejected',
       });
+      this.taskStartedAt.delete(payload.taskId);
       return;
     }
 
@@ -1585,6 +1713,11 @@ export class AhaApp {
       };
 
       this.sendEnvelope(ws, pending.requestId, ServerEvents.TASK_STATUS_CHANGE, statusPayload);
+      this.emitTaskProgress(ws, pending.requestId, task.id, {
+        stage: 'thinking',
+        message: 'Approval received. Resuming the task.',
+        execution: pending.execution,
+      });
     }
 
     const policyAfterApproval = this.evaluateToolPolicy(
@@ -1603,6 +1736,12 @@ export class AhaApp {
         summary: policyAfterApproval.reason ?? 'Approved action still denied by policy',
         errorCode: policyAfterApproval.errorCode ?? 'AHA-POLICY-001',
       } satisfies TaskTerminalPayload);
+      this.emitTaskProgress(ws, pending.requestId, payload.taskId, {
+        stage: 'failed',
+        message: policyAfterApproval.reason ?? 'Approved action still denied by policy',
+        execution: pending.execution,
+      });
+      this.taskStartedAt.delete(payload.taskId);
       return;
     }
 
@@ -1641,6 +1780,12 @@ export class AhaApp {
         summary: `Resume failed: ${errMsg}`,
         errorCode: 'AHA-SYS-001',
       } satisfies TaskTerminalPayload);
+      this.emitTaskProgress(ws, pending.requestId, payload.taskId, {
+        stage: 'failed',
+        message: `Resume failed: ${errMsg}`,
+        execution: pending.execution,
+      });
+      this.taskStartedAt.delete(payload.taskId);
     });
   }
 
@@ -1686,10 +1831,15 @@ export class AhaApp {
 
     this.clearTaskRecoveryState(payload.taskId);
     this.sendEnvelope(ws, envelope.requestId, ServerEvents.TASK_TERMINAL, terminalPayload);
+    this.emitTaskProgress(ws, envelope.requestId, payload.taskId, {
+      stage: 'failed',
+      message: terminalPayload.summary,
+    });
     this.logProgress('task_cancelled', {
       taskId: payload.taskId,
       reason: terminalPayload.summary,
     });
+    this.taskStartedAt.delete(payload.taskId);
   }
 
   private handleListMemories(
@@ -1814,6 +1964,56 @@ export class AhaApp {
     const ts = new Date().toISOString();
     const suffix = details ? ` ${JSON.stringify(details)}` : '';
     console.log(`[AhaAgent][${ts}] ${event}${suffix}`);
+  }
+
+  private emitTaskProgress(
+    ws: WebSocket,
+    requestId: string,
+    taskId: string,
+    options: TaskProgressOptions,
+  ): void {
+    const timestamp = new Date().toISOString();
+    const payload: TaskProgressPayload = {
+      taskId,
+      stage: options.stage,
+      message: options.message,
+      ...(options.detail ? { detail: options.detail } : {}),
+      ...(options.step !== undefined ? { step: options.step + 1 } : {}),
+      ...(options.execution ? { totalSteps: options.execution.budget.maxSteps } : {}),
+      ...(options.toolName ? { toolName: options.toolName } : {}),
+      ...(this.taskStartedAt.get(taskId) ? { startedAt: this.taskStartedAt.get(taskId) } : {}),
+      timestamp,
+    };
+    this.sendEnvelope(ws, requestId, ServerEvents.TASK_PROGRESS, payload);
+  }
+
+  private describeToolProgress(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): string {
+    switch (toolName) {
+      case 'memory_search':
+        return 'Searching stored memory for relevant context.';
+      case 'memory_store':
+        return 'Saving useful details into long-term memory.';
+      case 'read_file':
+        return 'Reading project files to gather context.';
+      case 'list_dir':
+        return 'Inspecting the workspace structure.';
+      case 'write_file':
+        return 'Preparing a file update.';
+      case 'run_command':
+        return 'Running a workspace command.';
+      case 'browser_tool': {
+        const action = typeof args?.action === 'string' ? args.action : 'browse';
+        if (action === 'search') return 'Searching the web for current information.';
+        if (action === 'open') return 'Opening a webpage.';
+        if (action === 'snapshot') return 'Capturing the current browser state.';
+        return `Using the browser tool (${action}).`;
+      }
+      default:
+        return `Running ${toolName}.`;
+    }
   }
 
   private sendEnvelope(ws: WebSocket, requestId: string, type: string, payload: unknown): void {

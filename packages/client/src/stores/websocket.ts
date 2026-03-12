@@ -3,6 +3,7 @@ import type {
   WsEnvelope,
   StreamChunkPayload,
   TaskStatusChangePayload,
+  TaskProgressPayload,
   ActionBlockedPayload,
   TaskTerminalPayload,
   ExecutionMode,
@@ -48,6 +49,18 @@ export interface MemoryItem {
   score?: number;
 }
 
+export interface TaskProgressEvent {
+  taskId: string;
+  stage: TaskProgressPayload['stage'];
+  message: string;
+  detail?: string;
+  step?: number;
+  totalSteps?: number;
+  toolName?: string;
+  startedAt?: string;
+  timestamp: string;
+}
+
 interface WebSocketState {
   socket: WebSocket | null;
   status: ConnectionStatus;
@@ -57,6 +70,9 @@ interface WebSocketState {
   executionMode: ExecutionMode;
   sessionId: string;
   rawMessages: RawWsMessage[];
+  activeTaskId: string | null;
+  taskProgress: Record<string, TaskProgressEvent>;
+  recentTaskEvents: TaskProgressEvent[];
   memories: MemoryItem[];
   memoryLoading: boolean;
   connect: (url: string) => void;
@@ -89,6 +105,9 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
   executionMode: 'interactive',
   sessionId: crypto.randomUUID(),
   rawMessages: [],
+  activeTaskId: null,
+  taskProgress: {},
+  recentTaskEvents: [],
   memories: [],
   memoryLoading: false,
 
@@ -149,9 +168,80 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
           });
         } else if (type === 'task_status_change') {
           const p = payload as TaskStatusChangePayload;
-          set({ taskState: p.state });
+          set((state) => {
+            const previous = state.taskProgress[p.taskId];
+            const progressEvent: TaskProgressEvent = {
+              taskId: p.taskId,
+              stage:
+                p.state === 'blocked' ? 'waiting_approval'
+                : p.state === 'failed' ? 'failed'
+                : p.state === 'success' ? 'completed'
+                : 'thinking',
+              message: p.desc,
+              step: p.budget?.stepsUsed,
+              totalSteps: p.budget?.stepsLimit,
+              startedAt: previous?.startedAt,
+              timestamp: new Date().toISOString(),
+            };
+            return {
+              taskState: p.state,
+              activeTaskId: p.taskId,
+              taskProgress: {
+                ...state.taskProgress,
+                [p.taskId]: progressEvent,
+              },
+              recentTaskEvents: [...state.recentTaskEvents, progressEvent].slice(-8),
+            };
+          });
+        } else if (type === 'task_progress') {
+          const p = payload as TaskProgressPayload;
+          const progressEvent: TaskProgressEvent = {
+            taskId: p.taskId,
+            stage: p.stage,
+            message: p.message,
+            detail: p.detail,
+            step: p.step,
+            totalSteps: p.totalSteps,
+            toolName: p.toolName,
+            startedAt: p.startedAt,
+            timestamp: p.timestamp,
+          };
+          set((state) => ({
+            activeTaskId: p.taskId,
+            taskProgress: {
+              ...state.taskProgress,
+              [p.taskId]: progressEvent,
+            },
+            recentTaskEvents: [...state.recentTaskEvents, progressEvent].slice(-8),
+          }));
         } else if (type === 'task_terminal') {
-          set({ taskState: 'idle', pendingApproval: null });
+          const p = payload as TaskTerminalPayload;
+          set((state) => {
+            const existing = state.taskProgress[p.taskId];
+            const finalProgress: TaskProgressEvent = {
+              taskId: p.taskId,
+              stage:
+                p.state === 'success' ? 'completed'
+                : p.state === 'cancelled' ? 'failed'
+                : 'failed',
+              message: p.summary,
+              step: existing?.step,
+              totalSteps: existing?.totalSteps,
+              toolName: existing?.toolName,
+              startedAt: existing?.startedAt,
+              timestamp: new Date().toISOString(),
+            };
+            return {
+              taskState: 'idle',
+              pendingApproval: null,
+              activeTaskId: p.taskId,
+              taskProgress: {
+                ...state.taskProgress,
+                [p.taskId]: finalProgress,
+              },
+              recentTaskEvents: [...state.recentTaskEvents, finalProgress].slice(-8),
+            };
+          });
         } else if (type === 'memory_list') {
           const p = payload as MemoryListPayload;
           set({ memories: p.items as MemoryItem[], memoryLoading: false });
@@ -195,6 +285,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       timestamp: Date.now(),
     };
     set((state) => ({ messages: [...state.messages, msg] }));
+    set({ activeTaskId: null });
     const envelope = JSON.stringify({
       protocolVersion: '1.0',
       sessionId: get().sessionId,

@@ -85,6 +85,26 @@ export interface TaskStatusChangePayload {
   };
 }
 
+export interface TaskProgressPayload {
+  taskId: string;
+  stage:
+    | 'created'
+    | 'thinking'
+    | 'memory'
+    | 'tool'
+    | 'waiting_approval'
+    | 'responding'
+    | 'completed'
+    | 'failed';
+  message: string;
+  detail?: string;
+  step?: number;
+  totalSteps?: number;
+  toolName?: string;
+  startedAt?: string;
+  timestamp: string;
+}
+
 export interface ActionBlockedPayload {
   taskId: string;
   approvalId: string;
@@ -171,6 +191,7 @@ export const ClientEvents = {
 export const ServerEvents = {
   STREAM_CHUNK: 'stream_chunk',
   TASK_STATUS_CHANGE: 'task_status_change',
+  TASK_PROGRESS: 'task_progress',
   ACTION_BLOCKED: 'action_blocked',
   TASK_TERMINAL: 'task_terminal',
   MEMORY_LIST: 'memory_list',
