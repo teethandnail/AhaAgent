@@ -60,6 +60,13 @@ export interface WriteFileOutput {
   version: string;
 }
 
+export interface DeleteFileInput {
+  path: string;
+}
+export interface DeleteFileOutput {
+  path: string;
+}
+
 export interface RunCommandInput {
   command: string;
   args: string[];

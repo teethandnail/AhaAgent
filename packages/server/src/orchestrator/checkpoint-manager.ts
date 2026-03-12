@@ -176,4 +176,28 @@ export class CheckpointManager {
       .where(eq(checkpoints.checkpointId, checkpointId))
       .run();
   }
+
+  /**
+   * Delete every checkpoint associated with a task.
+   */
+  deleteCheckpointsForTask(taskId: string): void {
+    this.db.delete(checkpoints).where(eq(checkpoints.taskId, taskId)).run();
+  }
+
+  /**
+   * Mark a task as failed during daemon restart reconciliation.
+   */
+  markTaskFailed(taskId: string, errorCode: string, errorMessage: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .update(tasks)
+      .set({
+        status: 'failed',
+        errorCode,
+        errorMessage,
+        updatedAt: now,
+      })
+      .where(eq(tasks.id, taskId))
+      .run();
+  }
 }

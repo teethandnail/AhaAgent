@@ -38,6 +38,7 @@ import { readFile } from './tools/read-file.js';
 import { listDir } from './tools/list-dir.js';
 import { computeFileVersion } from './tools/file-version.js';
 import { runCommand } from './tools/run-command.js';
+import { writeFileSafely } from './tools/write-file.js';
 import { extractMainContent, fetchUrlWithSafety, searchWebDuckDuckGo } from './tools/web-search.js';
 import { BrowserAutomationService } from './tools/browser-automation.js';
 import { evaluate } from './policy/policy-engine.js';
@@ -137,6 +138,10 @@ const CODING_TOOLS = [
         properties: {
           path: { type: 'string', description: 'Absolute or workspace-relative file path.' },
           content: { type: 'string', description: 'File content.' },
+          expectedVersion: {
+            type: 'string',
+            description: 'Required when overwriting an existing file; use the version returned by read_file.',
+          },
         },
         required: ['path', 'content'],
         additionalProperties: false,
@@ -427,6 +432,9 @@ export class AhaApp {
 
     const contextWindow = parseInt(process.env.AHA_CONTEXT_WINDOW ?? '128000', 10);
     this.contextManager = new ContextManager({ contextWindow });
+
+    // 3.5. Reconcile tasks left mid-flight by the previous daemon process.
+    this.reconcileInterruptedTasksOnStartup();
 
     // 4. Start gateway with message handler
     this.gateway = createGateway({
@@ -1117,6 +1125,8 @@ export class AhaApp {
       case 'write_file': {
         const pathArg = typeof args.path === 'string' ? args.path : '';
         const content = typeof args.content === 'string' ? args.content : '';
+        const expectedVersion =
+          typeof args.expectedVersion === 'string' ? args.expectedVersion : undefined;
         if (!pathArg) return { ok: false, error: 'path is required' };
 
         const target = this.resolveWorkspacePath(pathArg);
@@ -1124,12 +1134,17 @@ export class AhaApp {
           return { ok: false, error: 'path escapes workspace boundary' };
         }
 
-        return this.mutationQueue.enqueue(async () => {
-          await fsp.mkdir(path.dirname(target), { recursive: true });
-          await fsp.writeFile(target, content, 'utf-8');
-          const version = await computeFileVersion(target);
-          return { ok: true, output: { path: target, version } };
-        });
+        return this.mutationQueue.enqueue(() =>
+          writeFileSafely({
+            path: target,
+            content,
+            expectedVersion,
+          }).then((result) =>
+            result.ok
+              ? { ok: true, output: result.output }
+              : { ok: false, errorCode: result.errorCode, error: result.errorMessage },
+          ),
+        );
       }
 
       case 'diff_edit': {
@@ -1645,5 +1660,38 @@ export class AhaApp {
       retryable: false,
     };
     this.sendEnvelope(ws, requestId, ServerEvents.ERROR, payload);
+  }
+
+  private reconcileInterruptedTasksOnStartup(): void {
+    if (!this.checkpointManager) return;
+
+    const pendingTasks = this.checkpointManager.loadPendingTasks();
+    if (pendingTasks.length === 0) return;
+
+    for (const task of pendingTasks) {
+      const checkpoint = this.checkpointManager.loadCheckpoint(task.id);
+      this.checkpointManager.markTaskFailed(
+        task.id,
+        'AHA-SYS-001',
+        'Task interrupted by daemon restart before automatic recovery was available.',
+      );
+      this.checkpointManager.deleteCheckpointsForTask(task.id);
+      this.auditLogger.audit({
+        traceId: crypto.randomUUID(),
+        taskId: task.id,
+        requestId: '',
+        actor: 'system',
+        action: 'startup_reconcile_task',
+        result: 'failed',
+        details: {
+          previousStatus: task.status,
+          checkpointId: checkpoint?.checkpointId,
+        },
+      });
+    }
+
+    this.logProgress('startup_reconciled_interrupted_tasks', {
+      count: pendingTasks.length,
+    });
   }
 }

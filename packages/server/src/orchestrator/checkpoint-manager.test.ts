@@ -208,6 +208,27 @@ describe('CheckpointManager', () => {
     expect(manager.loadCheckpoint('task-4')).toBeNull();
   });
 
+  it('deleteCheckpointsForTask removes all checkpoints for a task', () => {
+    manager.saveTask({ id: 'task-5', title: 'T5', status: 'running' });
+    manager.saveCheckpoint({
+      checkpointId: 'cp-5a',
+      taskId: 'task-5',
+      stepId: 'step-1',
+      llmContextRef: 'ctx-1',
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+    manager.saveCheckpoint({
+      checkpointId: 'cp-5b',
+      taskId: 'task-5',
+      stepId: 'step-2',
+      llmContextRef: 'ctx-2',
+      createdAt: '2025-01-02T00:00:00.000Z',
+    });
+
+    manager.deleteCheckpointsForTask('task-5');
+    expect(manager.loadCheckpoint('task-5')).toBeNull();
+  });
+
   // --- loadPendingTasks ---
 
   it('loadPendingTasks returns non-terminal tasks only', () => {
@@ -232,5 +253,17 @@ describe('CheckpointManager', () => {
   it('loadPendingTasks returns empty array when no tasks exist', () => {
     const pending = manager.loadPendingTasks();
     expect(pending).toEqual([]);
+  });
+
+  it('markTaskFailed updates task status and error details', () => {
+    manager.saveTask({ id: 'task-6', title: 'T6', status: 'running' });
+
+    manager.markTaskFailed('task-6', 'AHA-SYS-001', 'Interrupted during restart');
+
+    const loaded = manager.loadTask('task-6');
+    expect(loaded).not.toBeNull();
+    expect(loaded!.status).toBe('failed');
+    expect(loaded!.errorCode).toBe('AHA-SYS-001');
+    expect(loaded!.errorMessage).toBe('Interrupted during restart');
   });
 });
