@@ -30,6 +30,13 @@ export { ApprovalManager } from './orchestrator/approval-manager.js';
 
 // Memory
 export { MemoryController } from './memory/memory-controller.js';
+export {
+  createEmbeddingProvider,
+  loadEmbeddingConfig,
+  cosineSimilarity,
+  type EmbeddingConfig,
+  type EmbeddingProvider,
+} from './memory/embedding.js';
 
 // Logger
 export { AuditLogger } from './logger/audit-logger.js';

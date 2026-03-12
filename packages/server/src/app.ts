@@ -35,6 +35,7 @@ import {
 } from './orchestrator/checkpoint-manager.js';
 import { MemoryController } from './memory/memory-controller.js';
 import { ContextManager } from './memory/context-manager.js';
+import { createEmbeddingProvider, type EmbeddingConfig } from './memory/embedding.js';
 import { validateMemoryStoreInput } from './memory/validation.js';
 import { validateMemoryUpdateInput } from './memory/validation.js';
 import { MutationQueue } from './orchestrator/mutation-queue.js';
@@ -369,6 +370,7 @@ export interface AhaAppConfig {
   workspacePath: string;
   dataDir: string;
   llmConfig?: { provider: string; model: string; apiKey: string; baseUrl: string };
+  embeddingConfig?: EmbeddingConfig;
 }
 
 export class AhaApp {
@@ -445,7 +447,11 @@ export class AhaApp {
     this.checkpointManager = new CheckpointManager(db, sqlite);
     this.checkpointManager.initSchema();
 
-    this.memoryController = new MemoryController(db, sqlite);
+    this.memoryController = new MemoryController(db, sqlite, {
+      embeddingProvider: this.config.embeddingConfig
+        ? createEmbeddingProvider(this.config.embeddingConfig)
+        : undefined,
+    });
     this.memoryController.initSchema();
 
     const contextWindow = parseInt(process.env.AHA_CONTEXT_WINDOW ?? '128000', 10);
@@ -1278,7 +1284,10 @@ export class AhaApp {
         const msQuery = typeof args.query === 'string' ? args.query : '';
         const msTopK = typeof args.topK === 'number' ? args.topK : 5;
         const msCategory = typeof args.category === 'string' ? args.category : undefined;
-        const msResults = this.memoryController.recall(msQuery, { topK: msTopK, category: msCategory });
+        const msResults = await this.memoryController.recallHybrid(msQuery, {
+          topK: msTopK,
+          category: msCategory,
+        });
         return {
           ok: true,
           output: JSON.stringify(

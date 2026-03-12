@@ -60,3 +60,14 @@ export const memories = sqliteTable('memories', {
   updatedAt: text('updated_at').notNull(),
   metadata: text('metadata'), // JSON string for extra data
 });
+
+export const memoryEmbeddings = sqliteTable('memory_embeddings', {
+  memoryId: text('memory_id')
+    .primaryKey()
+    .references(() => memories.id),
+  embeddingModel: text('embedding_model').notNull(),
+  embeddingDim: integer('embedding_dim').notNull(),
+  embeddingJson: text('embedding_json').notNull(),
+  contentHash: text('content_hash').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

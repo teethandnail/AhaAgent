@@ -3,6 +3,7 @@ import os from 'node:os';
 import { AhaApp } from './app.js';
 import { loadLLMConfig } from './llm/config.js';
 import type { LLMConfig } from './llm/router.js';
+import { loadEmbeddingConfig } from './memory/embedding.js';
 
 async function main(): Promise<void> {
   const workspacePath = process.argv[2] ?? process.cwd();
@@ -17,6 +18,7 @@ async function main(): Promise<void> {
     // LLM config is optional; the agent can start without it
     console.warn('Warning: No LLM config found. LLM features will be unavailable.');
   }
+  const embeddingConfig = loadEmbeddingConfig();
 
   const app = new AhaApp({
     port,
@@ -31,6 +33,7 @@ async function main(): Promise<void> {
           baseUrl: llmConfig.baseUrl,
         }
       : undefined,
+    embeddingConfig,
   });
 
   const { port: actualPort, token } = await app.start();

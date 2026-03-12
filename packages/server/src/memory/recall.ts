@@ -207,6 +207,7 @@ export function rerankMemories<T extends RerankableMemory>(
   query: string,
   items: T[],
   baseRanks: Map<string, number>,
+  vectorScores?: Map<string, number>,
 ): Array<T & { score: number }> {
   const terms = extractQueryTerms(query);
   const now = Date.now();
@@ -232,11 +233,22 @@ export function rerankMemories<T extends RerankableMemory>(
       const recencyScore = 0.14 / (1 + recencyDays);
       const frequencyScore = Math.min(0.14, Math.log10(item.accessCount + 1) * 0.1);
       const categoryScore = inferCategoryBoost(query, item.category);
+      const vectorScore = Math.max(0, vectorScores?.get(item.id) ?? 0) * 0.22;
 
       return {
         ...item,
         score:
-          Number((textScore + exactPhraseScore + baseScore * 0.18 + recencyScore + frequencyScore + categoryScore).toFixed(4)),
+          Number(
+            (
+              textScore +
+              exactPhraseScore +
+              baseScore * 0.18 +
+              recencyScore +
+              frequencyScore +
+              categoryScore +
+              vectorScore
+            ).toFixed(4),
+          ),
       };
     })
     .sort((a, b) => b.score - a.score);

@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from '../db/schema.js';
 import { MemoryController } from './memory-controller.js';
+import type { EmbeddingProvider } from './embedding.js';
 import { buildFtsQuery, containsCJK, rerankMemories } from './recall.js';
 
 function createInMemoryDb() {
@@ -11,6 +12,21 @@ function createInMemoryDb() {
   sqlite.pragma('foreign_keys = ON');
   const db = drizzle(sqlite, { schema });
   return { db, sqlite };
+}
+
+class MockEmbeddingProvider implements EmbeddingProvider {
+  readonly model = 'mock-embedding-1';
+
+  async embed(input: string[]): Promise<number[][]> {
+    return input.map((item) => {
+      const text = item.toLowerCase();
+      return [
+        text.includes('typescript') ? 1 : 0,
+        text.includes('react') ? 1 : 0,
+        text.includes('dark') || text.includes('theme') ? 1 : 0,
+      ];
+    });
+  }
 }
 
 describe('MemoryController', () => {
@@ -114,6 +130,40 @@ describe('MemoryController', () => {
     expect(second.id).not.toBe(first.id);
   });
 
+  it('store keeps normal memory flow working when embedding is disabled', async () => {
+    const entry = controller.store({
+      content: 'Project uses TypeScript',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+
+    await controller.awaitIdle();
+
+    expect(controller.isEmbeddingEnabled()).toBe(false);
+    expect(controller.get(entry.id)?.content).toBe('Project uses TypeScript');
+    expect(controller.getEmbeddingCount()).toBe(0);
+  });
+
+  it('store creates embedding rows when provider is enabled', async () => {
+    const result = createInMemoryDb();
+    const embeddingController = new MemoryController(result.db, result.sqlite, {
+      embeddingProvider: new MockEmbeddingProvider(),
+    });
+    embeddingController.initSchema();
+
+    embeddingController.store({
+      content: 'Project uses TypeScript',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    await embeddingController.awaitIdle();
+
+    expect(embeddingController.isEmbeddingEnabled()).toBe(true);
+    expect(embeddingController.getEmbeddingCount()).toBe(1);
+
+    result.sqlite.close();
+  });
+
   // --- get ---
 
   it('get returns stored memory', () => {
@@ -192,6 +242,47 @@ describe('MemoryController', () => {
     expect(sensitivities).toEqual(['public', 'restricted']);
   });
 
+  it('recallHybrid falls back to lexical recall when embedding is disabled', async () => {
+    controller.store({ content: 'Project uses TypeScript', category: 'fact', sensitivity: 'public' });
+
+    const results = await controller.recallHybrid('TypeScript');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.content).toContain('TypeScript');
+  });
+
+  it('recallHybrid merges vector candidates with lexical results', async () => {
+    const result = createInMemoryDb();
+    const embeddingController = new MemoryController(result.db, result.sqlite, {
+      embeddingProvider: new MockEmbeddingProvider(),
+    });
+    embeddingController.initSchema();
+
+    embeddingController.store({
+      content: 'Project uses TypeScript across the server',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    embeddingController.store({
+      content: 'React powers the client bundle',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    await embeddingController.awaitIdle();
+
+    const results = await embeddingController.recallHybrid('TypeScript React', { topK: 2 });
+
+    expect(results).toHaveLength(2);
+    expect(results.map((item) => item.content)).toEqual(
+      expect.arrayContaining([
+        'Project uses TypeScript across the server',
+        'React powers the client bundle',
+      ]),
+    );
+
+    result.sqlite.close();
+  });
+
   // --- update ---
 
   it('update modifies memory fields', () => {
@@ -212,6 +303,35 @@ describe('MemoryController', () => {
     expect(updated!.sensitivity).toBe('public'); // unchanged
   });
 
+  it('update refreshes existing embedding rows', async () => {
+    const result = createInMemoryDb();
+    const embeddingController = new MemoryController(result.db, result.sqlite, {
+      embeddingProvider: new MockEmbeddingProvider(),
+    });
+    embeddingController.initSchema();
+
+    const stored = embeddingController.store({
+      content: 'Project uses React',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    await embeddingController.awaitIdle();
+    expect(embeddingController.getEmbeddingCount()).toBe(1);
+
+    embeddingController.update(stored.id, {
+      content: 'Project uses TypeScript',
+      category: 'fact',
+    });
+    await embeddingController.awaitIdle();
+
+    const row = result.sqlite
+      .prepare('SELECT content_hash AS contentHash FROM memory_embeddings WHERE memory_id = ?')
+      .get(stored.id) as { contentHash: string };
+    expect(row.contentHash).toBeTruthy();
+
+    result.sqlite.close();
+  });
+
   // --- delete ---
 
   it('delete removes memory', () => {
@@ -226,6 +346,27 @@ describe('MemoryController', () => {
     const result = controller.delete(stored.id);
     expect(result).toBe(true);
     expect(controller.get(stored.id)).toBeNull();
+  });
+
+  it('delete removes linked embedding rows', async () => {
+    const result = createInMemoryDb();
+    const embeddingController = new MemoryController(result.db, result.sqlite, {
+      embeddingProvider: new MockEmbeddingProvider(),
+    });
+    embeddingController.initSchema();
+
+    const stored = embeddingController.store({
+      content: 'Project uses TypeScript',
+      category: 'fact',
+      sensitivity: 'public',
+    });
+    await embeddingController.awaitIdle();
+    expect(embeddingController.getEmbeddingCount()).toBe(1);
+
+    embeddingController.delete(stored.id);
+    expect(embeddingController.getEmbeddingCount()).toBe(0);
+
+    result.sqlite.close();
   });
 
   // --- session cache ---
