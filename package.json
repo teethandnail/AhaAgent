@@ -10,6 +10,7 @@
     "build": "tsc --build tsconfig.json",
     "build:clean": "tsc --build --clean tsconfig.json && tsc --build tsconfig.json",
     "dev": "concurrently -n shared,server,client \"npm run dev -w packages/shared\" \"npm run dev -w packages/server\" \"npm run dev -w packages/client\"",
+    "schema-check": "vitest run --project shared packages/shared/src/protocol.test.ts packages/shared/src/tools.test.ts packages/shared/src/errors.test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
